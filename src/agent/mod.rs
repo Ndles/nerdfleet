@@ -1,9 +1,17 @@
-//! The agent: runs on the host being watched, as the user who connected,
-//! and writes measurements to stdout until stdin closes.
+//! The agent: runs on the host being watched, as the user who connected.
+//!
+//! In watch mode (`agent --stdio`) it writes measurements to stdout until
+//! stdin closes, or, when a resident agent runs on the host, connects the
+//! viewer to that one instead. In resident mode (`agent --resident`) it
+//! keeps sampling as a user service; see `resident`.
 //!
 //! It only reads: `/proc`, `/sys` and the GPU libraries. It never listens
-//! on a socket and never reads another process's environment.
+//! on a network socket and never reads another process's environment.
 
+#[cfg(target_os = "linux")]
+mod alerts;
+#[cfg(target_os = "linux")]
+mod core;
 #[cfg(target_os = "linux")]
 mod gpu;
 #[cfg(target_os = "linux")]
@@ -11,18 +19,14 @@ mod linux;
 #[cfg(target_os = "linux")]
 mod procs;
 #[cfg(target_os = "linux")]
+pub mod resident;
+#[cfg(target_os = "linux")]
 mod workload;
 
-use crate::model::{AgentMsg, Frame, Hello, ViewerMsg, MAX_INTERVAL_MS, MIN_INTERVAL_MS};
+use crate::model::{AgentMsg, Frame, Hello, ViewerMsg};
 use crate::proto::{read_frame, write_frame, PROTOCOL_VERSION};
 use std::io::Write;
 use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-/// How often workloads are worked out. Slightly under two seconds, so that
-/// with one-second samples it is every second sample.
-#[cfg(target_os = "linux")]
-const WORK_EVERY: Duration = Duration::from_millis(1900);
 
 /// Reads a small file in one go. `/proc` and `/sys` files report a size of
 /// zero, so `fs::read_to_string` probes them with a series of small reads;
@@ -40,6 +44,10 @@ fn read_file(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
 /// `x86_64-linux`, `aarch64-macos`.
 pub fn target() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+fn hello(resident: bool) -> Hello {
+    Hello { protocol: PROTOCOL_VERSION, version: env!("CARGO_PKG_VERSION").to_string(), target: target(), resident }
 }
 
 fn send<W: Write>(out: &mut W, msg: AgentMsg) -> std::io::Result<()> {
@@ -61,61 +69,66 @@ fn listen() -> mpsc::Receiver<ViewerMsg> {
     rx
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn run_stdio() -> anyhow::Result<()> {
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    let hello = Hello { protocol: PROTOCOL_VERSION, version: env!("CARGO_PKG_VERSION").to_string(), target: target() };
-    send(&mut out, AgentMsg::Hello(hello))?;
+    send(&mut out, AgentMsg::Hello(hello(false)))?;
+    send(&mut out, AgentMsg::Error(format!("the agent does not support {} yet", std::env::consts::OS)))?;
     let inbox = listen();
-    run(&mut out, &inbox)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run<W: Write>(out: &mut W, inbox: &mpsc::Receiver<ViewerMsg>) -> anyhow::Result<()> {
-    send(out, AgentMsg::Error(format!("the agent does not support {} yet", std::env::consts::OS)))?;
     while inbox.recv().is_ok() {}
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn run_resident() -> anyhow::Result<()> {
+    anyhow::bail!("resident mode does not support {} yet", std::env::consts::OS)
+}
+
 #[cfg(target_os = "linux")]
-fn run<W: Write>(out: &mut W, inbox: &mpsc::Receiver<ViewerMsg>) -> anyhow::Result<()> {
-    use crate::model::{Inventory, Sample, Workloads};
+pub fn run_resident() -> anyhow::Result<()> {
+    resident::run()
+}
 
-    let (mut gpus, mut problems) = gpu::Gpus::discover();
-    let mounts = linux::mounts();
-    let inventory = |gpus: &gpu::Gpus| Inventory {
-        hostname: linux::hostname(),
-        os: linux::os_name(),
-        kernel: linux::kernel(),
-        cpu_model: linux::cpu_model(),
-        threads: linux::CpuReader::threads(),
-        mem_total: linux::mem().total,
-        mounts: mounts.clone(),
-        gpus: gpus.info(),
+#[cfg(target_os = "linux")]
+pub fn run_stdio() -> anyhow::Result<()> {
+    use crate::model::{MAX_INTERVAL_MS, MIN_INTERVAL_MS};
+    use std::time::Duration;
+
+    // A resident agent has the history and the alerts: hand the viewer to
+    // it. One of another protocol (an older build) is left alone.
+    let mismatch = match resident::attach()? {
+        resident::Attach::Done => return Ok(()),
+        resident::Attach::None => None,
+        resident::Attach::Mismatch(h) => Some(h),
     };
-    send(out, AgentMsg::Inventory(inventory(&gpus)))?;
 
-    let mut cpu = linux::CpuReader::default();
-    let mut disk_io = linux::DiskIo::default();
-    let mut net = linux::NetIo::default();
-    // Prime the counters, so the first sample has rates to report.
-    cpu.sample();
-    disk_io.sample();
-    net.sample();
-    let mut scanner = procs::Scanner::default();
-    let mut tracker = workload::Tracker::default();
-    scanner.scan();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    send(&mut out, AgentMsg::Hello(hello(false)))?;
+    if let Some(h) = mismatch {
+        send(
+            &mut out,
+            AgentMsg::Error(format!(
+                "the resident agent here is an older build (version {}, protocol {}); \
+                 run `nerdfleet resident enable` for this host to update it",
+                h.version, h.protocol
+            )),
+        )?;
+    }
+    let inbox = listen();
+    let mut core = core::Core::new(Default::default(), Vec::new());
+    send(&mut out, AgentMsg::Inventory(core.inventory().clone()))?;
+    // No history to send: this agent has just started, and the viewer
+    // keeps what it collected before a reconnect. A resident agent sends
+    // its own.
     let mut interval = Duration::from_millis(1000);
     let mut detail = false;
-    let mut worked: Option<Instant> = None;
-    let mut reported: Vec<String> = Vec::new();
-
     loop {
         match inbox.recv_timeout(interval) {
             Ok(ViewerMsg::Subscribe { interval_ms, detail: d }) => {
                 interval = Duration::from_millis(interval_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS) as u64);
                 // Asked for detail: send it with the next sample.
                 if d && !detail {
-                    worked = None;
+                    core.work_now();
                 }
                 detail = d;
                 continue;
@@ -123,53 +136,9 @@ fn run<W: Write>(out: &mut W, inbox: &mpsc::Receiver<ViewerMsg>) -> anyhow::Resu
             Ok(ViewerMsg::Bye) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let mut changed = false;
-        let gpu_samples = gpus.sample(&mut problems, &mut changed);
-        if changed {
-            send(out, AgentMsg::Inventory(inventory(&gpus)))?;
+        for msg in core.tick(detail) {
+            send(&mut out, msg)?;
         }
-        // Each problem is reported once, not every second.
-        for p in problems.drain(..) {
-            if !reported.contains(&p) {
-                send(out, AgentMsg::Error(p.clone()))?;
-                reported.push(p);
-            }
-        }
-        let time_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-        let sample = Sample {
-            time_ms,
-            cpu: cpu.sample(),
-            mem: linux::mem(),
-            disks: mounts.iter().map(|m| linux::disk(m)).collect(),
-            disk_io: disk_io.sample(),
-            net: net.sample(),
-            gpus: gpu_samples,
-        };
-        let gpu_util: Vec<Option<u8>> = sample.gpus.iter().map(|g| g.util).collect();
-        send(out, AgentMsg::Sample(sample))?;
-
-        // The kernel takes about 10 µs to describe each process, so the
-        // process table is read every `WORK_EVERY`, not every sample.
-        if worked.is_some_and(|t: Instant| t.elapsed() < WORK_EVERY) {
-            continue;
-        }
-        worked = Some(Instant::now());
-        let procs = scanner.scan();
-        let gpu_procs = gpus.processes();
-        // Listing listening sockets walks every socket on the host; only
-        // do it when some job needs its ports.
-        let listening = std::cell::OnceCell::new();
-        let ports = |pid: u32| procs::ports_of(pid, listening.get_or_init(procs::listening));
-        let input = workload::Input {
-            procs: &procs,
-            gpus: &gpu_procs,
-            gpu_util: &gpu_util,
-            ports: &ports,
-            detail,
-            me: std::process::id(),
-        };
-        let (list, top) = tracker.update(&input);
-        send(out, AgentMsg::Workloads(Workloads { list, top }))?;
     }
 }
 

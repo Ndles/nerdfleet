@@ -23,6 +23,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// NVML's process lists are asked every this many NVIDIA queries (about
+/// six seconds): with training running they were most of the agent's cost,
+/// and a job alone on a GPU is measured by the GPU's own utilization anyway.
+const PROCS_EVERY: u8 = 3;
+
 /// GPU memory below which an idle NVIDIA GPU has no processes worth listing.
 const IDLE_MEM: u64 = 256 << 20;
 
@@ -91,8 +96,10 @@ pub struct Gpus {
     /// When NVIDIA GPUs were last asked, and whether this sample did.
     nvidia_at: Option<Instant>,
     nvidia_fresh: bool,
-    /// NVML's compute processes per GPU index, as of `nvidia_at`.
+    /// NVML's compute processes per GPU index, and how many more NVIDIA
+    /// queries reuse them.
     nvidia_procs: Vec<(u16, nvml::NvProc)>,
+    procs_left: u8,
 }
 
 fn read_hex(path: &Path) -> Option<u32> {
@@ -199,6 +206,7 @@ impl Gpus {
             nvidia_at: None,
             nvidia_fresh: false,
             nvidia_procs: Vec::new(),
+            procs_left: 0,
         };
         let problems = gpus.start_nvidia().into_iter().collect();
         (gpus, problems)
@@ -354,7 +362,11 @@ impl Gpus {
                 });
             }
         }
+        let ask = self.nvidia_fresh && self.procs_left == 0;
         if self.nvidia_fresh {
+            self.procs_left = if ask { PROCS_EVERY - 1 } else { self.procs_left - 1 };
+        }
+        if ask {
             self.nvidia_procs.clear();
             if let Some(lib) = self.nvml.as_ref().filter(|l| l.started()) {
                 for (i, e) in self.entries.iter().enumerate() {

@@ -64,6 +64,7 @@ fn parse(text: &str) -> Vec<(String, Gpu)> {
                     temp_c: num(temp),
                     power_w: num(power),
                     clock_mhz: num(clock).map(|v| v as u32),
+                    throttled: None,
                 },
             ))
         })

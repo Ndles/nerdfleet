@@ -49,6 +49,20 @@ Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN
 graphs, every GPU in full, each workload's processes and command line (with keys and passwords masked on the host),
 and the busiest processes.
 
+## Resident agents
+
+By default the agent on a host runs only while you watch. To keep 24 hours of history and get alerts while you are
+away (a training run that stalls, a model server that stops, a disk filling up), make it resident:
+
+```sh
+nerdfleet resident enable gpu-box     # a systemd user service; no root needed
+nerdfleet resident status gpu-box
+nerdfleet resident disable gpu-box    # --purge also removes its saved history
+```
+
+A user service stops at your last logout unless lingering is on for your user; `enable` tells you, and prints the
+command an admin would run. In the host view, `t` switches the graphs between 15 minutes, 6 hours and 24 hours.
+
 ## How it reaches hosts
 
 - **Your own SSH setup.** nerdfleet runs the system `ssh` with the host's alias, so the address, user, key, jump hosts

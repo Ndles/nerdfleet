@@ -28,6 +28,11 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// What a resident agent remembers between runs.
+pub fn state_dir() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("nerdfleet")
+}
+
 /// Per-session sockets: SSH control masters now, the resident agent's
 /// socket later.
 pub fn runtime_dir() -> PathBuf {

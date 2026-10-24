@@ -1,5 +1,6 @@
 //! The messages agents and the viewer exchange, and the data they carry.
 
+use crate::history::History;
 use crate::proto::{bad, Wire};
 use std::io;
 
@@ -31,6 +32,10 @@ pub enum AgentMsg {
     Sample(Sample),
     /// What the host is doing, after each sample.
     Workloads(Workloads),
+    /// Graph history so far, once after the inventory.
+    History(History),
+    /// Alerts: the log so far when a viewer connects, then each new one.
+    Alerts(Vec<Alert>),
     /// A sampler or a detector failed. The agent carries on without it.
     Error(String),
 }
@@ -55,6 +60,8 @@ pub struct Hello {
     pub version: String,
     /// The build target, such as `x86_64-linux`.
     pub target: String,
+    /// A resident agent, which keeps sampling while nobody watches.
+    pub resident: bool,
 }
 
 /// What a host is: sent once after `Hello`, and again if it changes.
@@ -188,6 +195,38 @@ pub struct Gpu {
     pub temp_c: Option<f32>,
     pub power_w: Option<f32>,
     pub clock_mhz: Option<u32>,
+    /// The GPU is slowing itself down for heat or a hardware limit; never
+    /// for its power cap, which is how GPUs normally run under load.
+    pub throttled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertKind {
+    /// A training run's GPUs have done almost nothing for a while, though
+    /// its processes are alive.
+    TrainingStalled,
+    /// A training run or model server is gone.
+    WorkloadEnded,
+    /// A model server's own process no longer listens on its port.
+    StoppedListening,
+    DiskFull,
+    GpuThrottled,
+    /// A GPU's memory has stayed nearly full.
+    GpuMemoryFull,
+    /// The viewer lost the host (made by the viewer, not an agent).
+    HostUnreachable,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Alert {
+    /// Unique per host, and growing: milliseconds since the epoch times a
+    /// thousand, plus a counter.
+    pub id: u64,
+    pub time_ms: u64,
+    pub kind: AlertKind,
+    /// What it is about: a workload's label, `gpu0`, a mount.
+    pub subject: String,
+    pub message: String,
 }
 
 /// What a workload is, in the terms of the people who run them.
@@ -290,6 +329,14 @@ impl Wire for AgentMsg {
                 out.push(4);
                 w.put(out);
             }
+            AgentMsg::History(h) => {
+                out.push(5);
+                h.put(out);
+            }
+            AgentMsg::Alerts(a) => {
+                out.push(6);
+                a.put(out);
+            }
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -299,6 +346,8 @@ impl Wire for AgentMsg {
             2 => AgentMsg::Sample(Wire::get(input)?),
             3 => AgentMsg::Error(Wire::get(input)?),
             4 => AgentMsg::Workloads(Wire::get(input)?),
+            5 => AgentMsg::History(Wire::get(input)?),
+            6 => AgentMsg::Alerts(Wire::get(input)?),
             _ => return Err(bad("unknown agent message")),
         })
     }
@@ -338,7 +387,7 @@ macro_rules! wire_struct {
     };
 }
 
-wire_struct!(Hello { protocol, version, target });
+wire_struct!(Hello { protocol, version, target, resident });
 wire_struct!(Inventory { hostname, os, kernel, cpu_model, threads, mem_total, mounts, gpus });
 wire_struct!(GpuInfo { vendor, name, bus, mem_total, shared_total, unified, power_limit_w, metrics });
 wire_struct!(Sample { time_ms, cpu, mem, disks, disk_io, net, gpus });
@@ -346,7 +395,34 @@ wire_struct!(Cpu { busy, cores, load });
 wire_struct!(Mem { total, available, cached, swap_total, swap_used });
 wire_struct!(Disk { total, used });
 wire_struct!(Io { read, write });
-wire_struct!(Gpu { power, util, mem_used, shared_used, temp_c, power_w, clock_mhz });
+wire_struct!(Gpu { power, util, mem_used, shared_used, temp_c, power_w, clock_mhz, throttled });
+wire_struct!(Alert { id, time_ms, kind, subject, message });
+
+impl Wire for AlertKind {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.push(match self {
+            AlertKind::TrainingStalled => 0,
+            AlertKind::WorkloadEnded => 1,
+            AlertKind::StoppedListening => 2,
+            AlertKind::DiskFull => 3,
+            AlertKind::GpuThrottled => 4,
+            AlertKind::HostUnreachable => 5,
+            AlertKind::GpuMemoryFull => 6,
+        });
+    }
+    fn get(input: &mut &[u8]) -> io::Result<Self> {
+        Ok(match u8::get(input)? {
+            0 => AlertKind::TrainingStalled,
+            1 => AlertKind::WorkloadEnded,
+            2 => AlertKind::StoppedListening,
+            3 => AlertKind::DiskFull,
+            4 => AlertKind::GpuThrottled,
+            5 => AlertKind::HostUnreachable,
+            6 => AlertKind::GpuMemoryFull,
+            _ => return Err(bad("unknown alert kind")),
+        })
+    }
+}
 wire_struct!(Workloads { list, top });
 wire_struct!(Workload { id, kind, label, model, ports, procs, started_s, cpu, rss, gpus, gpu_idle_s, cmdline });
 wire_struct!(WorkloadGpu { gpu, mem, busy });
@@ -429,7 +505,14 @@ mod tests {
     #[test]
     fn messages_survive_a_roundtrip() {
         let msgs = vec![
-            AgentMsg::Hello(Hello { protocol: 1, version: "0.1.0".into(), target: "x86_64-linux".into() }),
+            AgentMsg::Hello(Hello { protocol: 1, version: "0.1.0".into(), target: "x86_64-linux".into(), resident: true }),
+            AgentMsg::Alerts(vec![Alert {
+                id: 1,
+                time_ms: 2,
+                kind: AlertKind::TrainingStalled,
+                subject: "torchrun train.py".into(),
+                message: "GPUs idle for 10m".into(),
+            }]),
             AgentMsg::Inventory(Inventory {
                 hostname: "host".into(),
                 threads: 32,

@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 /// refusal, not a pass.
 /// One line, with no `!` and no backslashes: the constructs fish and
 /// csh-family login shells treat differently inside single quotes.
-const PREPARE: &str = "umask 077; \
+pub(crate) const PREPARE: &str = "umask 077; \
     c=\"${XDG_CACHE_HOME:-}\"; case \"$c\" in /*) ;; *) c=\"$HOME/.cache\";; esac; d=\"$c/nerdfleet\"; \
     mkdir -p \"$d\" || exit 99; test -L \"$d\" && exit 99; test -O \"$d\" || exit 99; \
     p=\"$(stat -c %a \"$d\" 2>/dev/null || stat -f %Lp \"$d\" 2>/dev/null)\"; test \"$p\" = 700 || exit 99; ";
@@ -33,11 +33,17 @@ const RUN: &str = "f=\"$d/$1\"; test -f \"$f\" || exit 97; \
     h=\"$(sha256sum \"$f\" | cut -c1-64)\"; test \"$h\" = \"$2\" || exit 98; exec \"$f\" agent --stdio";
 
 /// Stores stdin as agent `$1` if its SHA-256 is `$2`, atomically, and
-/// removes older agents.
+/// removes older agents, except the one a resident agent's unit runs: it
+/// would not start again after a restart or a reboot without it.
 const UPLOAD: &str = "t=\"$(mktemp \"$d/.upload.XXXXXX\")\" || exit 99; cat > \"$t\" || { rm -f \"$t\"; exit 99; }; \
     h=\"$(sha256sum \"$t\" | cut -c1-64)\"; \
     if test \"$h\" = \"$2\"; then chmod 700 \"$t\" && mv -f \"$t\" \"$d/$1\"; else rm -f \"$t\"; exit 98; fi; \
-    for o in \"$d\"/agent-*; do test \"$o\" = \"$d/$1\" || rm -f \"$o\"; done";
+    g=\"${XDG_CONFIG_HOME:-}\"; case \"$g\" in /*) ;; *) g=\"$HOME/.config\";; esac; \
+    k=\"$(grep -o \"agent-[A-Za-z0-9._-]*\" \"$g/systemd/user/nerdfleet-agent.service\" 2>/dev/null | head -n 1)\"; \
+    for o in \"$d\"/agent-*; do b=\"${o##*/}\"; test \"$b\" = \"$1\" || test \"$b\" = \"$k\" || rm -f \"$o\"; done";
+
+/// The upload script, for callers outside this module.
+pub(crate) const UPLOAD_SCRIPT: &str = UPLOAD;
 
 pub const EXIT_MISSING: i32 = 97;
 pub const EXIT_MISMATCH: i32 = 98;
@@ -148,7 +154,7 @@ impl Ssh {
         cmd
     }
 
-    fn script(&self, script: &str, args: &[&str]) -> Command {
+    pub(crate) fn script(&self, script: &str, args: &[&str]) -> Command {
         let mut cmd = self.base();
         cmd.arg("--").arg(&self.alias).arg(remote_command(script, args));
         cmd
@@ -252,7 +258,7 @@ mod tests {
 
     #[test]
     fn scripts_survive_every_login_shell() {
-        for s in [PREPARE, PROBE, RUN, UPLOAD] {
+        for s in [PREPARE, PROBE, RUN, UPLOAD, crate::resident_ctl::VERIFY, crate::resident_ctl::ENABLE, crate::resident_ctl::DISABLE, crate::resident_ctl::STATUS] {
             assert!(!s.contains('\'') && !s.contains('!') && !s.contains('\\') && !s.contains('\n'));
         }
     }
@@ -272,6 +278,8 @@ mod tests {
                 .args(args)
                 .env("HOME", &home)
                 .env_remove("XDG_CACHE_HOME")
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("XDG_STATE_HOME")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()
@@ -287,6 +295,20 @@ mod tests {
         let out = sh(RUN, &["agent-x", &hash], b"");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "agent agent --stdio\n");
         assert_eq!(sh(RUN, &["agent-x", "0000"], b"").status.code(), Some(EXIT_MISMATCH));
+        // A new build replaces older ones, except the one a resident's unit
+        // runs: it must still be there when the service next starts.
+        let units = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(units.join("nerdfleet-agent.service"), "ExecStart=/bin/sh -c '...' nerdfleet agent-x 00\n").unwrap();
+        let newer = b"#!/bin/sh\necho newer\n";
+        let newer_hash = hex(&Sha256::digest(newer));
+        let dir = home.join(".cache/nerdfleet");
+        std::fs::write(dir.join("agent-stale"), b"old").unwrap();
+        assert!(sh(UPLOAD, &["agent-y", &newer_hash], newer).status.success());
+        assert!(dir.join("agent-y").exists(), "the new build");
+        assert!(dir.join("agent-x").exists(), "the resident's build is kept");
+        assert!(!dir.join("agent-stale").exists(), "others go");
+
         // A directory others can enter is refused.
         use std::os::unix::fs::PermissionsExt;
         let dir = home.join(".cache/nerdfleet");

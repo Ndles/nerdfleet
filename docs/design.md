@@ -102,24 +102,80 @@ resident agent through a Unix socket in the user's private runtime directory ins
 
 ### Resident mode in detail
 
-- **Enabling it.** `nerdfleet resident enable <host>` copies the agent (see [Agent deployment](#agent-deployment)),
-  writes a systemd user unit to `~/.config/systemd/user/nerdfleet-agent.service`, and starts it with
-  `systemctl --user`. `disable` stops it and removes the unit; history files stay until `--purge`.
-- **Surviving logout.** A user service stops when the user's last session ends, unless lingering is enabled for that
-  user. That is a system setting (`loginctl enable-linger`, which may need admin rights), so nerdfleet checks it,
-  explains it, and prints the command, but never runs it or anything else with elevated rights.
-- **Hardening.** The unit runs with systemd's sandboxing for user services where the host's systemd supports it:
-  `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=read-only` with only the agent's own state
-  directory writable, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` (loopback metrics only), and a memory cap.
-- **History.** Each series keeps three resolutions: 1 second for 15 minutes, 10 seconds for 6 hours, and 1 minute for
-  24 hours, about 4,500 points per series. A workload timeline records when each workload started, stalled and ended,
-  with its label and kind only, never its command line.
-- **Persistence.** History is written every few minutes to `$XDG_STATE_HOME/nerdfleet/history.bin` (directory 0700,
-  file 0600) so restarting the agent or rebooting the host keeps it. The file holds numbers, labels and timestamps,
-  and is read back with the same limits as the protocol.
-- **Upgrades.** The unit points at the versioned agent path. When the viewer deploys a new version, it rewrites the
-  unit and restarts the service; the new agent loads the old history file if its format is compatible, and starts
-  fresh otherwise.
+As built in phase 3 (2026-10-24), and checked on an Arch laptop and an Ubuntu 26.04 APU box.
+
+- **Enabling it.** `nerdfleet resident enable <host>`:
+  - copies and verifies the agent (see [Agent deployment](#agent-deployment));
+  - writes `~/.config/systemd/user/nerdfleet-agent.service` and starts it with `systemctl --user`;
+  - removes older agent builds;
+  - reports whether lingering is on.
+
+  `nerdfleet resident status <host>` says whether it runs. `disable` stops it and removes the unit; the saved state
+  stays until `disable --purge`. The same commands work for `local = true` hosts, without SSH.
+- **Surviving logout.** A user service stops when the user's last session ends, unless lingering is on for that user.
+  That is an admin setting, so nerdfleet says whether it is on and prints `sudo loginctl enable-linger <user>`, but
+  never runs it or anything else with elevated rights.
+- **Integrity at every start.** The unit's `ExecStart` is the same fixed `sh -c` script as every other start:
+  - It checks that the agent directory is private and the file's SHA-256 matches, then runs `agent --resident`.
+  - `$` and `%` are doubled for systemd.
+  - Tested: a replaced agent file makes the unit refuse to start (exit 98, retried every 10 s), and `enable` copies a
+    good build back. A viewer connecting at that point repairs it too, if its own build is the one the unit runs;
+    otherwise it copies its own build, and the unit keeps failing until `resident enable` is run.
+  - A running binary cannot be written in place ("Text file busy"); only a replaced one is a threat.
+- **Hardening.** The unit sets:
+  - `NoNewPrivileges`, `RestrictAddressFamilies=AF_UNIX` (the agent needs no network);
+  - `RestrictNamespaces`, `LockPersonality`, `RestrictRealtime`, `SystemCallArchitectures=native`;
+  - `CPUQuota=10%`, `MemoryMax=128M`, `TasksMax=64`, `Nice=10`, `UMask=0077`.
+
+  All of these are enforced on both Arch and Ubuntu, checked with throwaway `systemd-run` units (for example, a TCP
+  socket is refused).
+
+  **Filesystem protections are left out on purpose:**
+  - `ProtectSystem`, `ProtectHome` and `PrivateTmp` in a user unit put the service in a user namespace of its own. From
+    there the kernel refuses to show other processes' fdinfo, even the user's own, which breaks ports and per-process
+    GPU use. That holds on both distributions.
+  - On Ubuntu 26.04 (`apparmor_restrict_unprivileged_userns=1`) they don't even protect anything: they are accepted and
+    not enforced.
+
+  The agent's real protection is that it only reads.
+- **No `StateDirectory=`.** With a config directory of the same name present (`~/.config/nerdfleet`, the viewer's),
+  systemd 259 takes `StateDirectory=nerdfleet` for a layout from before systemd 253, and links
+  `~/.local/state/nerdfleet` to the config directory. The enable script creates the state directory itself (mode
+  0700, never a symlink); `RuntimeDirectory=nerdfleet` (0700, preserved across stops) is fine.
+- **The socket.** `$XDG_RUNTIME_DIR/nerdfleet/agent.sock`, mode 0600, in a 0700 directory.
+  - The resident and anyone connecting both check the other end's user id (`SO_PEERCRED`).
+  - A second resident refuses to start.
+  - A stale socket is removed only if it is a socket owned by the user and nothing answers on it.
+- **Viewers.**
+  - Each viewer's connection gets the hello, the inventory, the history and the alert log, then live messages.
+  - The resident always samples every second, whatever viewers ask.
+  - It works out detail if any viewer wants it, and strips it for the others.
+  - Every viewer has a queue of 64 frames; a full queue drops that viewer, so sampling never waits for one.
+- **Attaching.** The viewer still runs `agent --stdio`. That command connects to the resident if the protocol versions
+  match, then passes bytes both ways.
+  - If the resident is another protocol version (an older build), it samples by itself and tells the viewer to run
+    `resident enable` again.
+  - With no resident, it samples by itself, as before.
+- **History.** Three rings, kept by the same code (`history.rs`) in agents and the viewer:
+  - one point per sample for 15 minutes;
+  - the highest value per 10 seconds for 6 hours;
+  - per minute for 24 hours.
+
+  Series: CPU, memory, and each GPU's utilization, one byte per point. The coarser rings are cut at fixed multiples of
+  their step, so a stretch with the agent off shows as a gap rather than being bridged. The host view's `t` switches
+  between the rings.
+- **Persistence.**
+  - The history and the alert log (the last 200 alerts) go to `$XDG_STATE_HOME/nerdfleet/agent-state.bin` every 5
+    minutes and on SIGTERM.
+  - The file is mode 0600, written to a temporary file and renamed, with a magic number and a layout version.
+  - It is read back with the protocol's limits. A damaged or older file means starting fresh.
+  - It holds numbers, alert messages and timestamps: no command lines.
+- **Cost.** 0.59% of a core over 3 minutes with no viewer attached, and 4 MiB of memory, on the APU box
+  (2026-10-24).
+- **Upgrades.**
+  - Deploying a new build never deletes the build the unit runs: the upload script keeps the file the unit names.
+  - The resident keeps running its build until `resident enable` is run again, which installs the new unit and
+    restarts it. The new agent loads the saved state if its layout matches.
 
 ### Relay
 
@@ -391,35 +447,61 @@ What it took:
   - process lists only for GPUs with work;
   - per-process utilization only when there are processes.
 
-With training running, the process-list calls come back and the cost rises somewhat. That case is still to be
-measured.
+With two-GPU training running, the process-list calls came back and the cost rose to 0.72%. NVML's process lists are
+now asked every 6 seconds, which brought it to 0.48%. A job alone on a GPU is measured by the GPU's own utilization
+anyway.
 
 ## Alerts
 
-Alerts are evaluated by the resident agent on the host, so they fire whether or not a viewer is connected. The set
-will grow with use; it starts small, and every alert can be turned off or tuned in the config.
+Alerts are worked out by the agent on the host, so a resident agent raises them whether or not a viewer is connected.
+A watch-mode agent raises them too, but only while someone is watching.
 
-**Starter set:**
+Each alert fires once, then re-arms only when its condition has clearly gone: below a lower level, or after a quiet
+spell. A value hovering at a threshold therefore doesn't raise one alert after another.
 
-| Alert             | Fires when                                                                        | Default        |
-|-------------------|-----------------------------------------------------------------------------------|----------------|
-| Training stalled  | a training run's GPUs stay under 5% for 10 minutes while its processes are alive  | on             |
-| Workload ended    | a training run or inference server exits; says whether it exited cleanly or was killed (OOM killer, signal) | on |
-| Server down       | an inference server stops answering on its port while its process is alive         | on             |
-| GPU memory full   | a GPU's memory stays above 95% for 2 minutes                                        | on             |
-| Disk nearly full  | a mount used by a workload, or the home or root filesystem, passes 90%              | on             |
-| GPU throttling    | a GPU reports thermal or power throttling for 5 minutes                             | on             |
-| Host unreachable  | the viewer loses a host's agent for more than a minute (evaluated by the viewer)    | on             |
-| High-CPU job done | a high-CPU workload ends                                                           | off            |
+The thresholds are fixed for now. The config that would tune them lives on the viewer's machine, while a resident
+agent runs on its own; getting settings to it is later work. The set grows with use.
+
+**Built (phase 3):**
+
+| Alert              | Fires when                                                                                   | Re-arms when                 |
+|--------------------|----------------------------------------------------------------------------------------------|------------------------------|
+| Training stalled   | a training run's GPUs have stayed under 5% for 10 minutes while its processes run (the [stall clock](#as-built-phase-2-linux)) | its GPUs are busy again |
+| Workload ended     | a training run or model server that lived at least 2 minutes is gone: off the list *and* its top process has exited (by pid and start time). A runner idling between its GPU phases has not ended. If the kernel's OOM kill count (`/proc/vmstat`) rose meanwhile, it says the OOM killer ran around the same time. | — |
+| Stopped listening  | a model server's own top process (llama-swap's `:8080`, not the ports of the models it swaps) listened for 30 s and then has not for 30 s, while running | it listens again |
+| Disk nearly full   | a shown mount passes 90%                                                                     | it is below 85%              |
+| GPU throttling     | an NVIDIA GPU under load has slowed itself for heat or a hardware limit for 5 minutes        | it stops                     |
+| GPU memory full    | a GPU's memory (shared memory, on unified-memory GPUs) stays at 95% or more for 2 minutes. The bar is high because PyTorch's caching allocator and vLLM's preallocation hold 90% or more on purpose. | it is below 90% |
+| Host unreachable   | the viewer has lost a host that was live for more than a minute (raised by the viewer)        | the host is back             |
+
+**Notes on the rules:**
+- **No exit status:** the agent didn't start the processes it watches, so "ended" can't say whether they exited
+  cleanly. The OOM count is the one cause the kernel records, and it is host-wide, hence "around the same time".
+- **Throttling** uses NVML's clock-event reasons: hardware slowdown, software and hardware thermal slowdown, and
+  hardware power brake (`0x8 | 0x20 | 0x40 | 0x80`, from `nvml.h`).
+  - The software power cap (`0x4`) is left out. The GPU box's cards report it the whole time they train at their
+    200 W limit, which is normal.
+  - It is asked every 10 s, and only above 10% utilization.
+  - AMD has no clean signal in sysfs, so AMD GPUs report none; guessing from temperature would be worse.
+- **"Stopped listening"** is the honest version of "server down". Checking whether a server answers would mean HTTP
+  requests, and the development box's servers all require a key.
+
+**Not built:**
+- **High-CPU job done:** off by default, as planned.
 
 **Delivery:**
-
-- Every alert goes into the host's alert log, kept with the history. The viewer shows unread alerts on the host's card
-  when it connects, so nothing is missed while the laptop was closed.
-- While the viewer runs, new alerts also appear as a desktop notification on the laptop (`notify-send` on Linux,
-  Notification Center on macOS) and in the TUI.
-- Sending alerts off the machines (ntfy, email, Slack) is later work. It would need credentials, which would be read
-  from a separate file with mode 0600 or the system keyring, never from the main config.
+- Every alert goes into the host's alert log (the last 200), saved with the history. The viewer receives the whole log
+  when it connects and keeps it.
+- **Unread alerts:**
+  - A card shows "⚠ N new" with the newest message.
+  - Opening the host view marks them read.
+  - Which alerts are read is kept per host in `$XDG_STATE_HOME/nerdfleet/viewer-read.txt` (mode 0600).
+- **Notifications:** alerts that happen while the viewer runs also go to `notify-send`, as arguments and never through
+  a shell, unless the user is looking at that host. Old alerts from the log never become notifications.
+- **Ids** are milliseconds times a thousand plus a counter, and always grow past the last saved id. So they stay unique
+  across restarts, and a clock that went back can't reuse one.
+- **Off the machines** (ntfy, email, Slack) is later work. It would need credentials, which would be read from a
+  separate file with mode 0600 or the system keyring, never from the main config.
 
 ## Access methods
 
@@ -686,10 +768,21 @@ Candidates to vet, none decided:
      - CPU checked live: a 12-process data export on the GPU box.
      - Desktop GPU users stay out.
      - The host view opens with `Enter`.
-     - Not yet checked against a real training run: NVML's process structs (compare with `nvidia-smi
-       --query-compute-apps`), rank grouping, and the stall clock.
+     - Checked against a real training run on the GPU box (2026-10-24):
+       - NVML's process structs decode correctly: 24.9 GiB per rank, the same as `nvidia-smi --query-compute-apps`.
+       - The experiment runner, `torchrun` and two ranks group into one training workload (8 processes).
+       - Per-GPU busy matches, at 94–100%.
+       - The run listens on about 16 ports (PyTorch's elastic agent and every rank), which confirms that ports must
+         not decide inference.
+       - Both cards report the software power cap (`0x4`) throughout, which is normal under load.
+     - The stall clock hasn't fired for real yet; it needs a run that actually stalls.
 3. **Resident mode and alerts.** The systemd user unit and its hardening, the three-resolution history and its file,
    the starter alerts, the alert log, and desktop notifications.
+   - **Status (2026-10-24):** built, and running as user services on the laptop and the APU box.
+     - Checked: attaching, history from before the viewer connected, refusal of a tampered agent, kept builds,
+       saving on stop, and the cost.
+     - Not yet seen for real: an alert firing on a live host. The rules are tested with synthetic sequences.
+     - The GPU box is left alone while its experiments run.
 4. **Terminals.** The two nerdmux changes, terminal panes, and the split layout.
 5. **Clusters.**
    - Relay, `job-step` access, the Slurm adapter and the cluster view.

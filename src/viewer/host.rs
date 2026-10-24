@@ -1,8 +1,9 @@
 //! One host up close: graphs over the history the viewer keeps, every GPU,
 //! every workload with its processes, and the busiest processes.
 
-use super::app::{HostView, HISTORY};
-use super::ui::{fit, gib, kind_color, level, rate, short_name, span, STALL_S};
+use super::app::HostView;
+use super::ui::{fit, gib, kind_color, level, level_char, rate, short_name, span, STALL_S};
+use crate::history::NONE;
 use crate::conn::State;
 use crate::model::{Kind, Power};
 use nerdmux::config::Theme;
@@ -19,14 +20,14 @@ pub struct HostUi<'a> {
     /// The selected workload, by index.
     pub selected: usize,
     pub own_bg: bool,
-    /// The agents' sampling interval: one history point per sample.
-    pub interval_ms: u32,
+    /// Which history ring the graphs show: an index into `WINDOWS`.
+    pub window: usize,
 }
 
-/// `series` (0 to 100) as `width` cells on a fixed time scale: the whole
-/// history the viewer keeps fits the width, each cell is the highest point
-/// of its stretch (so short spikes still show), and the newest cell is at
-/// the right edge.
+/// `series` (0 to 100, or `NONE`) as `width` cells on a fixed time scale:
+/// the whole ring (`cap` points) fits the width, each cell is the highest
+/// point of its stretch (so short spikes still show), and the newest cell
+/// is at the right edge.
 ///
 /// `newest` is the absolute number of the last point. Cells are cut at
 /// fixed absolute positions, not counted back from the newest point, so a
@@ -34,31 +35,33 @@ pub struct HostUi<'a> {
 /// line moves left one cell at a time. (Counting back made every cell's
 /// stretch shift with each new point, and a scale that depended on how
 /// much history there was made the line jump whenever it grew.)
-fn spark(series: &VecDeque<u64>, newest: u64, width: usize) -> String {
-    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+fn spark(series: &VecDeque<u8>, newest: u64, cap: usize, width: usize) -> String {
     if width == 0 || series.is_empty() {
         return " ".repeat(width);
     }
-    let per = HISTORY.div_ceil(width).max(1) as u64;
+    let per = cap.div_ceil(width).max(1) as u64;
     let first = (newest + 1).saturating_sub(series.len() as u64);
     let last_cell = newest / per;
-    // As many cells as the history fills completely, plus the newest, which
-    // is filling. Showing more would put a part-empty cell at the left edge,
+    // As many cells as the ring fills completely, plus the newest, which is
+    // filling. Showing more would put a part-empty cell at the left edge,
     // changing as its oldest points age out.
-    let cells_shown = (width as u64).min(HISTORY as u64 / per);
+    let cells_shown = (width as u64).min(cap as u64 / per);
     let first_cell = (first / per).max((last_cell + 1).saturating_sub(cells_shown));
-    let mut cells = vec![None::<u64>; (last_cell - first_cell + 1) as usize];
+    let mut cells = vec![NONE; (last_cell - first_cell + 1) as usize];
     for (i, &v) in series.iter().enumerate() {
         let cell = (first + i as u64) / per;
-        if cell >= first_cell {
+        if cell >= first_cell && v != NONE {
             let c = &mut cells[(cell - first_cell) as usize];
-            *c = Some(c.map_or(v, |m| m.max(v)));
+            *c = if *c == NONE { v } else { (*c).max(v) };
         }
     }
     let mut s = " ".repeat(width.saturating_sub(cells.len()));
-    s.extend(cells.iter().map(|c| c.map_or(' ', |v| LEVELS[((v.min(100) * 7 + 50) / 100) as usize])));
+    s.extend(cells.iter().map(|&v| level_char(v)));
     s
 }
+
+/// The graph windows `t` steps through: one per history ring.
+pub const WINDOWS: [&str; 3] = ["15m", "6h", "24h"];
 
 impl HostUi<'_> {
     pub fn draw(&self, area: Rect, buf: &mut Buffer) {
@@ -81,7 +84,7 @@ impl HostUi<'_> {
             left.push(Span::styled(" not live ", Style::default().fg(t.red)));
         }
         Line::from(left).render(bar_area, buf);
-        let keys = "↑↓ workload  Esc back  q quit ";
+        let keys = "↑↓ workload  t window  Esc back  q quit ";
         let kw = keys.chars().count() as u16;
         if area.width > kw + 30 {
             Span::styled(keys, dim).render(Rect { x: area.x + area.width - kw, width: kw, ..bar_area }, buf);
@@ -103,16 +106,18 @@ impl HostUi<'_> {
         lines.push(Line::from(""));
 
         // Graphs: a label line with the numbers, then the history.
-        // The graphs' fixed window: the whole history, filled or not.
-        let window = format!("last {}", span(HISTORY as u64 * self.interval_ms as u64 / 1000));
+        let ring = &h.history.rings[self.window.min(h.history.rings.len() - 1)];
+        let empty = VecDeque::new();
+        let graph = |i: usize| spark(ring.series.get(i).unwrap_or(&empty), ring.end, ring.cap, w);
+        let kept = if h.resident { "" } else { ", since this viewer connected" };
+        let window = format!("last {}{kept}", WINDOWS[self.window.min(WINDOWS.len() - 1)]);
         lines.push(Line::from(vec![
             Span::styled("CPU  ", dim),
             Span::styled(format!("{:>3.0}%", s.cpu.busy * 100.0), Style::default().fg(t.fg).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  load {:.2} {:.2} {:.2}", s.cpu.load[0], s.cpu.load[1], s.cpu.load[2]), dim),
             Span::styled(format!("   {window}"), dim),
         ]));
-        let newest = h.samples.saturating_sub(1);
-        lines.push(Line::from(Span::styled(spark(&h.cpu, newest, w), Style::default().fg(t.accent))));
+        lines.push(Line::from(Span::styled(graph(0), Style::default().fg(t.accent))));
         let used = s.mem.total.saturating_sub(s.mem.available);
         let mem_pct = used as f32 * 100.0 / s.mem.total.max(1) as f32;
         lines.push(Line::from(vec![
@@ -130,7 +135,7 @@ impl HostUi<'_> {
                 dim,
             ),
         ]));
-        lines.push(Line::from(Span::styled(spark(&h.mem, newest, w), Style::default().fg(level(t, mem_pct)))));
+        lines.push(Line::from(Span::styled(graph(1), Style::default().fg(level(t, mem_pct)))));
 
         for (i, (info, g)) in inv.gpus.iter().zip(&s.gpus).enumerate() {
             let mut spans = vec![
@@ -175,9 +180,7 @@ impl HostUi<'_> {
                 }
             }
             lines.push(Line::from(spans));
-            if let Some(series) = h.gpus.get(i) {
-                lines.push(Line::from(Span::styled(spark(series, newest, w), Style::default().fg(t.accent))));
-            }
+            lines.push(Line::from(Span::styled(graph(2 + i), Style::default().fg(t.accent))));
         }
 
         let mut io = vec![Span::styled("DISK ", dim)];
@@ -278,6 +281,25 @@ impl HostUi<'_> {
         }
         lines.push(Line::from(""));
 
+        // Alerts, newest first.
+        if !h.alerts.is_empty() {
+            let now = s.time_ms;
+            lines.push(head(&format!("ALERTS  {}", h.alerts.len())));
+            for a in h.alerts.iter().rev().take(8) {
+                let new = a.id > h.read_up_to;
+                let ago = format!("{:>4} ago  ", span(now.saturating_sub(a.time_ms) / 1000));
+                let style = if new { Style::default().fg(t.red).add_modifier(Modifier::BOLD) } else { Style::default().fg(t.fg) };
+                lines.push(Line::from(vec![Span::styled(ago, dim), Span::styled(fit(&a.message, w.saturating_sub(11)), style)]));
+            }
+            lines.push(Line::from(""));
+        } else if !h.resident {
+            lines.push(Line::from(Span::styled(
+                "alerts and history from before this viewer connected need the resident agent: nerdfleet resident enable",
+                dim,
+            )));
+            lines.push(Line::from(""));
+        }
+
         // The busiest processes.
         let top = &h.workloads.top;
         if !top.is_empty() {
@@ -317,10 +339,11 @@ mod tests {
     use super::spark;
     use std::collections::VecDeque;
 
-    use super::HISTORY;
+    use crate::history::{NONE, RINGS};
+    const HISTORY: usize = RINGS[0].1;
 
     /// Feeds points one at a time, as samples arrive, and renders after each.
-    fn frames(width: usize, n: u64, value: impl Fn(u64) -> u64) -> Vec<String> {
+    fn frames(width: usize, n: u64, value: impl Fn(u64) -> u8) -> Vec<String> {
         let mut s = VecDeque::new();
         (0..n)
             .map(|i| {
@@ -328,7 +351,7 @@ mod tests {
                     s.pop_front();
                 }
                 s.push_back(value(i));
-                spark(&s, i, width)
+                spark(&s, i, HISTORY, width)
             })
             .collect()
     }
@@ -336,7 +359,7 @@ mod tests {
     #[test]
     fn graphs_grow_and_scroll_without_jumping() {
         let width = 120;
-        let frames = frames(width, 3 * HISTORY as u64, |i| (i * 37) % 101);
+        let frames = frames(width, 3 * HISTORY as u64, |i| ((i * 37) % 101) as u8);
         let mut drawn_before = 0;
         for (i, f) in frames.iter().enumerate() {
             assert_eq!(f.chars().count(), width);
@@ -352,7 +375,7 @@ mod tests {
     #[test]
     fn finished_cells_never_change() {
         let width = 120;
-        let frames = frames(width, 3 * HISTORY as u64, |i| (i * 37) % 101);
+        let frames = frames(width, 3 * HISTORY as u64, |i| ((i * 37) % 101) as u8);
         let mut shifts = 0;
         for (i, pair) in frames.windows(2).enumerate() {
             let a: Vec<char> = pair[0].trim_start().chars().collect();
@@ -375,8 +398,10 @@ mod tests {
 
     #[test]
     fn short_spikes_still_show() {
-        let s: VecDeque<u64> = (0..100).map(|i| if i == 37 { 100 } else { 0 }).collect();
-        assert!(spark(&s, 99, 10).contains('█'));
-        assert_eq!(spark(&VecDeque::new(), 0, 3), "   ");
+        let s: VecDeque<u8> = (0..100).map(|i| if i == 37 { 100 } else { 0 }).collect();
+        assert!(spark(&s, 99, HISTORY, 10).contains('█'));
+        assert_eq!(spark(&VecDeque::new(), 0, HISTORY, 3), "   ");
+        let gaps: VecDeque<u8> = [50, NONE, NONE, 50].into_iter().collect();
+        assert_eq!(spark(&gaps, 3, 4, 4), "▅  ▅", "a gap is blank, not bridged");
     }
 }

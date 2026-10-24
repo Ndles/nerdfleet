@@ -13,8 +13,17 @@ type Ret = c_int;
 type Device = *mut c_void;
 const SUCCESS: Ret = 0;
 const ERROR_INSUFFICIENT_SIZE: Ret = 7;
-/// The clock is asked every this many samples.
+/// The clock (and the throttling reasons) are asked every this many
+/// samples.
 const CLOCK_EVERY: u8 = 5;
+/// Clock event reasons that mean the GPU is slowing itself down for heat or
+/// a hardware limit, from `nvml.h`: hardware slowdown, software thermal
+/// slowdown, hardware thermal slowdown, hardware power brake. The software
+/// power cap (0x4) is left out on purpose: a GPU under load runs at its cap
+/// all the time.
+const THROTTLE_REASONS: u64 = 0x8 | 0x20 | 0x40 | 0x80;
+/// Below this utilization, throttling is not worth asking about.
+const THROTTLE_MIN_UTIL: u32 = 10;
 /// What NVML reports for a value it may not show (another user's process
 /// memory, without privileges).
 const VALUE_NOT_AVAILABLE: u64 = u64::MAX;
@@ -84,6 +93,9 @@ struct Api {
     /// Missing from older drivers; per-process numbers are then unknown.
     compute_procs: Option<unsafe extern "C" fn(Device, *mut c_uint, *mut ProcessInfo) -> Ret>,
     proc_util: Option<unsafe extern "C" fn(Device, *mut ProcessUtil, *mut c_uint, u64) -> Ret>,
+    /// `nvmlDeviceGetCurrentClocksEventReasons`, or the older name of the
+    /// same call.
+    clock_events: Option<unsafe extern "C" fn(Device, *mut u64) -> Ret>,
 }
 
 /// One process computing on an NVIDIA GPU.
@@ -114,9 +126,9 @@ pub struct NvGpu {
     /// The newest utilization sample seen, so each query returns only
     /// newer ones.
     last_util: std::cell::Cell<u64>,
-    /// The clock, and how many more samples reuse it: it changes slowly,
-    /// and every NVML call is a driver call.
-    clock: std::cell::Cell<(Option<u32>, u8)>,
+    /// The clock and throttling, and how many more samples reuse them:
+    /// they change slowly, and every NVML call is a driver call.
+    clock: std::cell::Cell<(Option<u32>, Option<bool>, u8)>,
 }
 
 // SAFETY: NVML handles are plain identifiers, and NVML is documented as
@@ -160,6 +172,9 @@ impl Nvml {
                 clock: sym(lib, c"nvmlDeviceGetClockInfo")?,
                 compute_procs: sym(lib, c"nvmlDeviceGetComputeRunningProcesses_v3").ok(),
                 proc_util: sym(lib, c"nvmlDeviceGetProcessUtilization").ok(),
+                clock_events: sym(lib, c"nvmlDeviceGetCurrentClocksEventReasons")
+                    .or_else(|_| sym(lib, c"nvmlDeviceGetCurrentClocksThrottleReasons"))
+                    .ok(),
             };
             Ok(Nvml { api, started: false })
         }
@@ -251,22 +266,32 @@ impl Nvml {
             let mut mem: Memory = std::mem::zeroed();
             let mut temp: c_uint = 0;
             let mut mw: c_uint = 0;
-            let (mut clock, left) = d.clock.get();
+            let util = ((a.utilization)(h, &mut util) == SUCCESS).then(|| util.gpu.min(100));
+            let (mut clock, mut throttled, left) = d.clock.get();
             if left == 0 {
                 let mut mhz: c_uint = 0;
                 clock = ((a.clock)(h, CLOCK_GRAPHICS, &mut mhz) == SUCCESS).then_some(mhz);
-                d.clock.set((clock, CLOCK_EVERY - 1));
+                throttled = match (a.clock_events, util) {
+                    (Some(_), Some(u)) if u < THROTTLE_MIN_UTIL => Some(false),
+                    (Some(events), Some(_)) => {
+                        let mut reasons: u64 = 0;
+                        (events(h, &mut reasons) == SUCCESS).then_some(reasons & THROTTLE_REASONS != 0)
+                    }
+                    _ => None,
+                };
+                d.clock.set((clock, throttled, CLOCK_EVERY - 1));
             } else {
-                d.clock.set((clock, left - 1));
+                d.clock.set((clock, throttled, left - 1));
             }
             Gpu {
                 power: Power::Awake,
-                util: ((a.utilization)(h, &mut util) == SUCCESS).then(|| util.gpu.min(100) as u8),
+                util: util.map(|u| u as u8),
                 mem_used: ((a.memory)(h, &mut mem) == SUCCESS).then_some(mem.used),
                 shared_used: None,
                 temp_c: ((a.temperature)(h, TEMPERATURE_GPU, &mut temp) == SUCCESS).then_some(temp as f32),
                 power_w: ((a.power)(h, &mut mw) == SUCCESS).then(|| mw as f32 / 1000.0),
                 clock_mhz: clock,
+                throttled,
             }
         }
     }

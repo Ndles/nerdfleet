@@ -71,7 +71,10 @@ fn basename(a: &str) -> &str {
 /// virtualenv installs run as `python /venv/bin/torchrun ...`; for those it
 /// is the tool, not the interpreter.
 fn program(p: &ProcInfo) -> String {
-    let Some(first) = p.args.first().map(|a| basename(a)).filter(|n| !n.is_empty()) else { return p.comm.clone() };
+    // Some programs rewrite their command line into one string (Chrome,
+    // anything using setproctitle): the program is its first word.
+    let first = p.args.first().map(|a| a.split(' ').next().unwrap_or(a));
+    let Some(first) = first.map(basename).filter(|n| !n.is_empty()) else { return p.comm.clone() };
     if is_python(first) {
         if let Some(tool) = p.args.get(1).filter(|a| a.contains('/') && !a.ends_with(".py") && !a.starts_with('-')) {
             return basename(tool).to_string();
@@ -233,7 +236,9 @@ fn secret_flag(flag: &str) -> bool {
 pub fn redact(args: &[String]) -> String {
     let mut out: Vec<String> = Vec::with_capacity(args.len());
     let mut hide_next = false;
-    for a in args {
+    // Word by word: a program that rewrote its command line into one string
+    // must not hide `--api-key x` inside a single argument.
+    for a in args.iter().flat_map(|a| a.split_whitespace()) {
         if hide_next {
             hide_next = false;
             out.push("***".into());
@@ -247,7 +252,7 @@ pub fn redact(args: &[String]) -> String {
             }
         } else if a.starts_with('-') {
             hide_next = secret_flag(a);
-            a.clone()
+            a.to_string()
         } else if let Some((k, _)) = a.split_once('=').filter(|(k, _)| {
             let env_style = !k.is_empty()
                 && k.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
@@ -260,7 +265,7 @@ pub fn redact(args: &[String]) -> String {
         } else {
             mask_url(a)
         };
-        out.push(masked);
+        out.push(masked.to_string());
     }
     out.join(" ")
 }
@@ -432,10 +437,16 @@ impl Tracker {
             let mut gpus: Vec<WorkloadGpu> =
                 job.gpu.iter().map(|(g, (mem, busy))| WorkloadGpu { gpu: *g, mem: *mem, busy: *busy }).collect();
             gpus.sort_by_key(|g| g.gpu);
+            // A server started by a wrapper or a script is named after the
+            // server, not the shell that runs it.
+            let named = match job.server {
+                Some(s) if kind == Kind::Inference && !is_server(top) => &procs[s],
+                _ => top,
+            };
             list.push(Workload {
                 id: top.pid,
                 kind,
-                label: label(top),
+                label: label(named),
                 model,
                 ports,
                 procs: job.members.len().min(u16::MAX as usize) as u16,
@@ -532,6 +543,17 @@ mod tests {
     }
 
     #[test]
+    fn a_server_under_a_script_is_named_after_the_server() {
+        let procs = vec![
+            proc(1, 0, "systemd", 0.0),
+            proc(10, 1, "timeout 2h sh serve.sh", 0.0),
+            proc(11, 10, "/opt/llama/llama-server -m /m/Qwen3-8B-Q4_K_M.gguf --port 8080", 0.1),
+        ];
+        let w = run(&procs, &[], &[]);
+        assert_eq!((w[0].label.as_str(), w[0].id), ("llama-server", 10));
+    }
+
+    #[test]
     fn a_proxy_without_a_model_is_still_a_server() {
         let procs = vec![proc(1, 0, "systemd", 0.0), proc(10, 1, "/opt/llama-swap/llama-swap -listen :8080", 0.0)];
         let w = run(&procs, &[], &[(10, 8080)]);
@@ -625,6 +647,16 @@ mod tests {
             assert!(!r.contains(secret), "{secret} leaked in {r}");
         }
         assert!(r.contains("--port 8080") && r.contains("--api-key ***") && r.contains("https://***@host/x"));
+    }
+
+    #[test]
+    fn rewritten_command_lines_are_split_before_masking() {
+        let args = vec!["/opt/app/server --type=x --api-key sk-999 --token=abc".to_string()];
+        let r = redact(&args);
+        assert!(!r.contains("sk-999") && !r.contains("abc"), "{r}");
+        assert_eq!(program(&proc(1, 0, "x", 0.0)), "x");
+        let chrome = ProcInfo { args: vec!["/opt/google/chrome/chrome --type=renderer --lang=en".to_string()].into(), ..proc(2, 0, "chrome", 0.0) };
+        assert_eq!(program(&chrome), "chrome");
     }
 
     #[test]

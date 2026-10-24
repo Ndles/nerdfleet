@@ -14,7 +14,7 @@
 use crate::text;
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The largest frame either side accepts. A sample is a few hundred bytes
 /// and an inventory a few kilobytes; history (later) is the large one.

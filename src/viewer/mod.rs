@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 enum Mode {
     Overview,
     /// One host up close, with a workload selected.
-    Host { host: usize, workload: usize },
+    Host { host: usize, workload: usize, window: usize },
 }
 
 /// Puts the terminal back however the viewer ends, panics included.
@@ -64,6 +64,11 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         conn::spawn(i, host.clone(), shared.clone(), tx.clone());
     }
     let mut hosts: Vec<HostView> = config.hosts.iter().map(HostView::new).collect();
+    for (name, id) in app::load_read() {
+        if let Some(h) = hosts.iter_mut().find(|h| h.name == name) {
+            h.read_up_to = id;
+        }
+    }
 
     let screen = Screen::enter()?;
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
@@ -81,6 +86,24 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             }
             dirty = true;
         }
+        let mut read_changed = false;
+        for (i, h) in hosts.iter_mut().enumerate() {
+            h.check_reachable();
+            // Alerts that just happened go to the desktop too, unless the
+            // user is looking at that host already.
+            let looking = matches!(mode, Mode::Host { host, .. } if host == i);
+            for a in h.fresh.drain(..) {
+                if !looking {
+                    notify(&h.name, &a.message);
+                }
+                dirty = true;
+            }
+            read_changed |= looking && h.mark_read();
+        }
+        if read_changed {
+            app::save_read(&hosts);
+            dirty = true;
+        }
         // Countdowns on down hosts tick even when nothing arrives.
         if dirty || last_draw.elapsed() > Duration::from_secs(1) {
             let drawn = term.draw(|f| {
@@ -88,12 +111,12 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                 match mode {
                     Mode::Overview => ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
                         .draw(area, f.buffer_mut()),
-                    Mode::Host { host, workload } => host::HostUi {
+                    Mode::Host { host, workload, window } => host::HostUi {
                         theme: &theme,
                         host: &hosts[host],
                         selected: workload,
                         own_bg: theme.own_palette,
-                        interval_ms: config.interval_ms,
+                        window,
                     }
                     .draw(area, f.buffer_mut()),
                 }
@@ -115,15 +138,20 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                 {
                     break Ok(());
                 }
-                if let Mode::Host { host, workload } = mode {
+                if let Mode::Host { host, workload, window } = mode {
                     let n = hosts[host].workloads.list.len();
                     match k.code {
                         KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
                             shared.set_detail(host, false);
                             mode = Mode::Overview;
                         }
-                        KeyCode::Up => mode = Mode::Host { host, workload: workload.saturating_sub(1) },
-                        KeyCode::Down => mode = Mode::Host { host, workload: (workload + 1).min(n.saturating_sub(1)) },
+                        KeyCode::Up => mode = Mode::Host { host, workload: workload.saturating_sub(1), window },
+                        KeyCode::Down => {
+                            mode = Mode::Host { host, workload: (workload + 1).min(n.saturating_sub(1)), window }
+                        }
+                        KeyCode::Char('t') => {
+                            mode = Mode::Host { host, workload, window: (window + 1) % host::WINDOWS.len() }
+                        }
                         _ => {}
                     }
                     continue;
@@ -132,7 +160,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     // Looking closely: ask that host for command lines and
                     // its busiest processes.
                     shared.set_detail(selected, true);
-                    mode = Mode::Host { host: selected, workload: 0 };
+                    mode = Mode::Host { host: selected, workload: 0, window: 0 };
                     continue;
                 }
                 // Arrows move, with or without Alt (nerdmux's pane keys).
@@ -157,6 +185,27 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
     drop(screen);
     shared.shutdown(&config.hosts);
     result
+}
+
+/// A desktop notification, when the desktop has a way to show one. The
+/// text came from a host, and was cleaned of control characters when it
+/// was read; it goes to `notify-send` as an argument, never through a
+/// shell, with markup characters escaped (notification daemons render
+/// Pango markup, and a workload's label is whatever its command line said).
+fn notify(host: &str, message: &str) {
+    use std::process::{Command, Stdio};
+    let _ = Command::new("notify-send")
+        .args(["--app-name=nerdfleet", "--", &format!("nerdfleet · {}", markup_escape(host)), &markup_escape(message)])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        // Reaped on a thread of its own, so no zombie stays behind.
+        .map(|mut child| std::thread::spawn(move || child.wait()));
+}
+
+fn markup_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// How many cards fit side by side; matches `ui::Ui::grid`.
@@ -193,9 +242,20 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
             Event::State(_, s) => println!("{s:?}"),
             Event::Agent(_, msg) => {
                 match &msg {
-                    AgentMsg::Hello(h) => println!("agent {} ({}), protocol {}", h.version, h.target, h.protocol),
+                    AgentMsg::Hello(h) => println!(
+                        "agent {} ({}), protocol {}{}",
+                        h.version,
+                        h.target,
+                        h.protocol,
+                        if h.resident { ", resident" } else { "" }
+                    ),
                     AgentMsg::Error(e) => println!("agent problem: {e}"),
-                    AgentMsg::Inventory(_) | AgentMsg::Workloads(_) => {}
+                    AgentMsg::Inventory(_) | AgentMsg::Workloads(_) | AgentMsg::History(_) => {}
+                    AgentMsg::Alerts(a) => {
+                        for a in a {
+                            println!("alert {}", a.message);
+                        }
+                    }
                     AgentMsg::Sample(_) => samples += 1,
                 }
                 view.apply(msg);
@@ -382,6 +442,11 @@ mod tests {
             ..Default::default()
         }));
         render(&[v], 120, 30);
+    }
+
+    #[test]
+    fn notifications_cannot_carry_markup() {
+        assert_eq!(super::markup_escape("<b>x</b> & y"), "&lt;b&gt;x&lt;/b&gt; &amp; y");
     }
 
     #[test]

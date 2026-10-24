@@ -20,6 +20,8 @@ use std::time::Instant;
 const CARD_MIN_WIDTH: u16 = 50;
 const LABEL: usize = 5;
 const TAIL: usize = 20;
+/// Width of a workload's kind on a card.
+const KIND: usize = LABEL + 1;
 /// Workloads listed on a card; the rest are counted.
 const CARD_WORKLOADS: usize = 3;
 /// A training run's GPUs idle this long is called out as possibly stalled.
@@ -143,7 +145,10 @@ impl Ui<'_> {
             )));
         if let Some(inv) = &host.inventory {
             block = block.title(
-                Line::from(Span::styled(format!(" {} · {} threads ", inv.os, inv.threads), Style::default().fg(t.dim)))
+                Line::from(Span::styled(
+                    format!(" {} · {} threads{} ", inv.os, inv.threads, if host.resident { " · resident" } else { "" }),
+                    Style::default().fg(t.dim),
+                ))
                     .right_aligned(),
             );
         }
@@ -192,7 +197,9 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
         let pct = format!(" {:>3.0}% ", cpu);
         let spark_w = TAIL.saturating_sub(pct.len());
         l.push(Span::styled(pct, Style::default().fg(t.fg)));
-        l.push(Span::styled(sparkline(&host.cpu, spark_w), Style::default().fg(t.accent)));
+        let empty = std::collections::VecDeque::new();
+        let cpu_history = host.history.recent(0).unwrap_or(&empty);
+        l.push(Span::styled(sparkline(cpu_history, spark_w), Style::default().fg(t.accent)));
         lines.push(Line::from(l));
 
         // Memory.
@@ -256,6 +263,16 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
             }
         }
     }
+    // Unread alerts, newest first: what happened while nobody looked.
+    let unread: Vec<&crate::model::Alert> = host.unread().collect();
+    if let Some(newest) = unread.last() {
+        let text = if unread.len() > 1 {
+            format!("⚠ {} new · {}", unread.len(), newest.message)
+        } else {
+            format!("⚠ {}", newest.message)
+        };
+        lines.push(Line::from(Span::styled(fit(&text, iw), Style::default().fg(t.red).add_modifier(Modifier::BOLD))));
+    }
     if let Some(p) = host.problems.last() {
         lines.push(Line::from(Span::styled(fit(&format!("! {p}"), iw), Style::default().fg(t.yellow))));
     }
@@ -292,7 +309,8 @@ pub fn workload_use(w: &Workload) -> String {
 
 /// One line on a card: kind, name, what it serves or runs, and its use.
 fn workload_line<'a>(t: &Theme, w: &Workload, iw: usize) -> Line<'a> {
-    let kind = format!("{:<LABEL$}", match w.kind {
+    // One column wider than the other labels: "TRAIN" fills five.
+    let kind = format!("{:<KIND$}", match w.kind {
         Kind::Inference => "INFR",
         Kind::Training => "TRAIN",
         Kind::Cpu => "CPU",
@@ -313,9 +331,9 @@ fn workload_line<'a>(t: &Theme, w: &Workload, iw: usize) -> Line<'a> {
     if let Some(p) = w.ports.first() {
         detail.push_str(&format!(" :{p}"));
     }
-    let room = iw.saturating_sub(LABEL + right.chars().count() + 1);
+    let room = iw.saturating_sub(KIND + right.chars().count() + 1);
     let detail = fit(&detail, room);
-    let pad = iw.saturating_sub(LABEL + detail.chars().count() + right.chars().count());
+    let pad = iw.saturating_sub(KIND + detail.chars().count() + right.chars().count());
     Line::from(vec![
         Span::styled(kind, Style::default().fg(kind_color(t, w.kind)).add_modifier(Modifier::BOLD)),
         Span::styled(detail, Style::default().fg(t.fg)),
@@ -450,14 +468,22 @@ pub fn bar<'a>(t: &Theme, width: usize, pct: f32, color: Color) -> Vec<Span<'a>>
 }
 
 /// The last `width` points of `series` (0 to 100) as block characters.
-pub fn sparkline(series: &std::collections::VecDeque<u64>, width: usize) -> String {
-    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+pub fn sparkline(series: &std::collections::VecDeque<u8>, width: usize) -> String {
     let skip = series.len().saturating_sub(width);
-    let mut s: String = series.iter().skip(skip).map(|&v| LEVELS[((v.min(100) * 7 + 50) / 100) as usize]).collect();
+    let mut s: String = series.iter().skip(skip).map(|&v| level_char(v)).collect();
     // Right-align, so the newest point is always at the same place.
     let pad = width.saturating_sub(s.chars().count());
     s.insert_str(0, &" ".repeat(pad));
     s
+}
+
+/// A block for a value from 0 to 100; a gap (`history::NONE`) is blank.
+pub fn level_char(v: u8) -> char {
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if v == crate::history::NONE {
+        return ' ';
+    }
+    LEVELS[(v.min(100) as usize * 7 + 50) / 100]
 }
 
 /// `s` cut to `width` characters, with an ellipsis when cut.
@@ -547,7 +573,9 @@ mod tests {
 
     #[test]
     fn sparklines_are_right_aligned() {
-        let s: std::collections::VecDeque<u64> = [0, 100].into_iter().collect();
+        let s: std::collections::VecDeque<u8> = [0, 100].into_iter().collect();
         assert_eq!(sparkline(&s, 4), "  ▁█");
+        let gap: std::collections::VecDeque<u8> = [50, crate::history::NONE, 50].into_iter().collect();
+        assert_eq!(sparkline(&gap, 3), "▅ ▅");
     }
 }

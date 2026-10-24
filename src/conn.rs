@@ -199,6 +199,8 @@ fn talk(index: usize, mut cmd: Command, alias: &str, shared: &Shared, tx: &Sende
                 }
                 *shared.writers[index].lock().unwrap() = Some(w);
                 let _ = tx.send(Event::State(index, State::Live));
+                // The viewer wants to know, too: whether it is resident.
+                let _ = tx.send(Event::Agent(index, AgentMsg::Hello(h)));
             }
             Ok(Some(_)) if !greeted => break Err(anyhow::anyhow!("the agent did not say hello")),
             // Relayed frames (clusters) are not used yet.

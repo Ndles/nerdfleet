@@ -6,8 +6,13 @@ use std::process::{Command, Stdio};
 
 #[test]
 fn agent_says_hello_then_describes_and_measures_the_host() {
+    // A runtime directory of its own: a resident agent running on this
+    // machine must not answer instead.
+    let run = std::env::temp_dir().join(format!("nerdfleet-agent-test-{}", std::process::id()));
+    std::fs::create_dir_all(&run).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_nerdfleet"))
         .args(["agent", "--stdio"])
+        .env("XDG_RUNTIME_DIR", &run)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -32,6 +37,7 @@ fn agent_says_hello_then_describes_and_measures_the_host() {
                 }
             }
             AgentMsg::Hello(_) => panic!("second hello"),
+            AgentMsg::History(_) | AgentMsg::Alerts(_) => {}
         }
     }
     let inventory = inventory.expect("no inventory before samples");

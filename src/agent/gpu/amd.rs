@@ -49,6 +49,9 @@ impl Amd {
             power_w: hw("power1_average").or_else(|| hw("power1_input")).map(|uw| uw as f32 / 1e6),
             temp_c: hw("temp1_input").map(|mc| mc as f32 / 1000.0),
             clock_mhz: hw("freq1_input").map(|hz| (hz / 1_000_000) as u32),
+            // amdgpu has no clean throttling signal in sysfs; guessing from
+            // the temperature would be worse than saying nothing.
+            throttled: None,
         }
     }
 }
