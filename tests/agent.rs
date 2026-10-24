@@ -13,7 +13,7 @@ fn agent_says_hello_then_describes_and_measures_the_host() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    write_frame(&mut stdin, &Frame { route: vec![], msg: ViewerMsg::Subscribe { interval_ms: 250 } }).unwrap();
+    write_frame(&mut stdin, &Frame { route: vec![], msg: ViewerMsg::Subscribe { interval_ms: 250, detail: true } }).unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let mut next = || read_frame::<_, Frame<AgentMsg>>(&mut stdout).unwrap().unwrap().msg;
 
@@ -26,6 +26,11 @@ fn agent_says_hello_then_describes_and_measures_the_host() {
             AgentMsg::Inventory(i) => inventory = Some(i),
             AgentMsg::Sample(s) => samples.push(s),
             AgentMsg::Error(e) => eprintln!("agent: {e}"),
+            AgentMsg::Workloads(w) => {
+                if cfg!(target_os = "linux") {
+                    assert!(!w.top.is_empty(), "detail mode lists top processes");
+                }
+            }
             AgentMsg::Hello(_) => panic!("second hello"),
         }
     }

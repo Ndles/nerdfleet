@@ -6,7 +6,7 @@
 
 use super::app::HostView;
 use crate::conn::State;
-use crate::model::{Gpu, GpuInfo, Power, Vendor};
+use crate::model::{Gpu, GpuInfo, Kind, Power, Vendor, Workload};
 use nerdmux::config::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -20,6 +20,10 @@ use std::time::Instant;
 const CARD_MIN_WIDTH: u16 = 50;
 const LABEL: usize = 5;
 const TAIL: usize = 20;
+/// Workloads listed on a card; the rest are counted.
+const CARD_WORKLOADS: usize = 3;
+/// A training run's GPUs idle this long is called out as possibly stalled.
+pub const STALL_S: u32 = 10 * 60;
 
 pub struct Ui<'a> {
     pub theme: &'a Theme,
@@ -74,7 +78,7 @@ impl Ui<'_> {
             Span::styled(format!("  {live}/{} live", self.hosts.len()), Style::default().fg(t.status_fg)),
         ]);
         left.render(area, buf);
-        let keys = Line::from(Span::styled("←↑↓→ select  q quit ", Style::default().fg(t.dim)));
+        let keys = Line::from(Span::styled("←↑↓→ select  Enter open  q quit ", Style::default().fg(t.dim)));
         let w = keys.width() as u16;
         if area.width > w + 20 {
             let r = Rect { x: area.x + area.width - w, width: w, ..area };
@@ -207,6 +211,15 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
             lines.push(gpu_bar_line(t, info, g, bar_w));
         }
 
+        let work = &host.workloads.list;
+        for w in work.iter().take(CARD_WORKLOADS) {
+            lines.push(workload_line(t, w, iw));
+        }
+        if work.len() > CARD_WORKLOADS {
+            let more = format!("     +{} more · Enter for all", work.len() - CARD_WORKLOADS);
+            lines.push(Line::from(Span::styled(more, Style::default().fg(t.dim))));
+        }
+
         // Disks: each shown mount's fullness, as many as fit.
         let mut l = vec![label("DISK")];
         let mut used_w = LABEL;
@@ -247,6 +260,68 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
         lines.push(Line::from(Span::styled(fit(&format!("! {p}"), iw), Style::default().fg(t.yellow))));
     }
     lines
+}
+
+pub fn kind_color(t: &Theme, k: Kind) -> Color {
+    match k {
+        Kind::Inference => t.cyan,
+        Kind::Training => t.magenta,
+        Kind::Cpu => t.yellow,
+    }
+}
+
+/// `12s`, `4m`, `3h`, `2d`: the largest unit that fits.
+pub fn span(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
+/// What a workload uses, short: `30.1G gpu0` or `6.2 cores`.
+pub fn workload_use(w: &Workload) -> String {
+    let gpu_mem: u64 = w.gpus.iter().map(|g| g.mem).sum();
+    match w.gpus.len() {
+        0 => format!("{:.1} cores", w.cpu),
+        1 => format!("{} gpu{}", gib(gpu_mem), w.gpus[0].gpu),
+        n => format!("{} {n} GPUs", gib(gpu_mem)),
+    }
+}
+
+/// One line on a card: kind, name, what it serves or runs, and its use.
+fn workload_line<'a>(t: &Theme, w: &Workload, iw: usize) -> Line<'a> {
+    let kind = format!("{:<LABEL$}", match w.kind {
+        Kind::Inference => "INFR",
+        Kind::Training => "TRAIN",
+        Kind::Cpu => "CPU",
+    });
+    let stalled = w.kind == Kind::Training && w.gpu_idle_s >= STALL_S;
+    let right = if stalled {
+        format!("GPUs idle {}", span(w.gpu_idle_s as u64))
+    } else {
+        workload_use(w)
+    };
+    let mut detail = w.label.clone();
+    if !w.model.is_empty() {
+        detail.push_str(" · ");
+        detail.push_str(&w.model);
+    } else if w.kind == Kind::Inference {
+        detail.push_str(" · no model loaded");
+    }
+    if let Some(p) = w.ports.first() {
+        detail.push_str(&format!(" :{p}"));
+    }
+    let room = iw.saturating_sub(LABEL + right.chars().count() + 1);
+    let detail = fit(&detail, room);
+    let pad = iw.saturating_sub(LABEL + detail.chars().count() + right.chars().count());
+    Line::from(vec![
+        Span::styled(kind, Style::default().fg(kind_color(t, w.kind)).add_modifier(Modifier::BOLD)),
+        Span::styled(detail, Style::default().fg(t.fg)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right, Style::default().fg(if stalled { t.red } else { t.dim })),
+    ])
 }
 
 fn vendor_color(t: &Theme, v: Vendor) -> Color {
@@ -347,7 +422,7 @@ fn gpu_bar_line<'a>(t: &Theme, info: &GpuInfo, g: &Gpu, bar_w: usize) -> Line<'a
 // ===== drawing helpers ======================================================
 
 /// Green, yellow or red for how full something is.
-fn level(t: &Theme, pct: f32) -> Color {
+pub fn level(t: &Theme, pct: f32) -> Color {
     if pct >= 90.0 {
         t.red
     } else if pct >= 75.0 {
@@ -359,7 +434,7 @@ fn level(t: &Theme, pct: f32) -> Color {
 
 /// A bar `width` cells wide filled to `pct`, with eighth-cell precision,
 /// on a track in the border color.
-fn bar<'a>(t: &Theme, width: usize, pct: f32, color: Color) -> Vec<Span<'a>> {
+pub fn bar<'a>(t: &Theme, width: usize, pct: f32, color: Color) -> Vec<Span<'a>> {
     const EIGHTHS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
     let eighths = ((pct.clamp(0.0, 100.0) / 100.0) * (width * 8) as f32).round() as usize;
     let full = eighths / 8;
@@ -375,7 +450,7 @@ fn bar<'a>(t: &Theme, width: usize, pct: f32, color: Color) -> Vec<Span<'a>> {
 }
 
 /// The last `width` points of `series` (0 to 100) as block characters.
-fn sparkline(series: &std::collections::VecDeque<u64>, width: usize) -> String {
+pub fn sparkline(series: &std::collections::VecDeque<u64>, width: usize) -> String {
     const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let skip = series.len().saturating_sub(width);
     let mut s: String = series.iter().skip(skip).map(|&v| LEVELS[((v.min(100) * 7 + 50) / 100) as usize]).collect();
@@ -386,7 +461,7 @@ fn sparkline(series: &std::collections::VecDeque<u64>, width: usize) -> String {
 }
 
 /// `s` cut to `width` characters, with an ellipsis when cut.
-fn fit(s: &str, width: usize) -> String {
+pub fn fit(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
         return s.to_string();
     }

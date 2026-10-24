@@ -29,6 +29,8 @@ pub enum AgentMsg {
     Hello(Hello),
     Inventory(Inventory),
     Sample(Sample),
+    /// What the host is doing, after each sample.
+    Workloads(Workloads),
     /// A sampler or a detector failed. The agent carries on without it.
     Error(String),
 }
@@ -36,9 +38,10 @@ pub enum AgentMsg {
 /// From the viewer to an agent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewerMsg {
-    /// How often to sample, in milliseconds. The agent keeps it within
-    /// `MIN_INTERVAL_MS..=MAX_INTERVAL_MS`.
-    Subscribe { interval_ms: u32 },
+    /// How often to sample, in milliseconds, which the agent keeps within
+    /// `MIN_INTERVAL_MS..=MAX_INTERVAL_MS`; and whether to send detail
+    /// (command lines, top processes) for a host the user is looking at.
+    Subscribe { interval_ms: u32, detail: bool },
     Bye,
 }
 
@@ -187,6 +190,81 @@ pub struct Gpu {
     pub clock_mhz: Option<u32>,
 }
 
+/// What a workload is, in the terms of the people who run them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A model server: llama.cpp, vLLM, Ollama, ...
+    Inference,
+    /// A process tree computing on a GPU that is not a server.
+    Training,
+    /// A process tree keeping CPUs busy, without a GPU.
+    Cpu,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Inference => "inference",
+            Kind::Training => "training",
+            Kind::Cpu => "cpu",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Workloads {
+    pub list: Vec<Workload>,
+    /// The busiest processes, in detail mode only.
+    pub top: Vec<Proc>,
+}
+
+/// A process tree doing one job, named after its top process.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Workload {
+    /// The top process's pid: stable while the job lives, even when the
+    /// processes under it come and go (a model server swapping models).
+    pub id: u32,
+    pub kind: Kind,
+    /// Program and script: `torchrun train.py`, `llama-swap`.
+    pub label: String,
+    /// The model an inference server has loaded; empty when none is, or for
+    /// other kinds.
+    pub model: String,
+    /// TCP ports the tree listens on.
+    pub ports: Vec<u16>,
+    pub procs: u16,
+    /// When the top process started, in seconds since the Unix epoch.
+    pub started_s: u64,
+    /// CPU cores in use.
+    pub cpu: f32,
+    pub rss: u64,
+    pub gpus: Vec<WorkloadGpu>,
+    /// For training: how long its GPUs have been nearly idle, in seconds.
+    /// Zero while they are busy.
+    pub gpu_idle_s: u32,
+    /// The top process's command line, with secrets masked; detail mode
+    /// only, empty otherwise.
+    pub cmdline: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkloadGpu {
+    /// Index into `Inventory::gpus`.
+    pub gpu: u16,
+    pub mem: u64,
+    /// The workload's share of the GPU's time, 0 to 100, where known.
+    pub busy: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Proc {
+    pub pid: u32,
+    pub name: String,
+    pub cpu: f32,
+    pub rss: u64,
+    pub gpu_mem: u64,
+}
+
 // ===== wire =================================================================
 
 impl Wire for AgentMsg {
@@ -208,6 +286,10 @@ impl Wire for AgentMsg {
                 out.push(3);
                 e.put(out);
             }
+            AgentMsg::Workloads(w) => {
+                out.push(4);
+                w.put(out);
+            }
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -216,6 +298,7 @@ impl Wire for AgentMsg {
             1 => AgentMsg::Inventory(Wire::get(input)?),
             2 => AgentMsg::Sample(Wire::get(input)?),
             3 => AgentMsg::Error(Wire::get(input)?),
+            4 => AgentMsg::Workloads(Wire::get(input)?),
             _ => return Err(bad("unknown agent message")),
         })
     }
@@ -224,16 +307,17 @@ impl Wire for AgentMsg {
 impl Wire for ViewerMsg {
     fn put(&self, out: &mut Vec<u8>) {
         match self {
-            ViewerMsg::Subscribe { interval_ms } => {
+            ViewerMsg::Subscribe { interval_ms, detail } => {
                 out.push(0);
                 interval_ms.put(out);
+                detail.put(out);
             }
             ViewerMsg::Bye => out.push(1),
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
         Ok(match u8::get(input)? {
-            0 => ViewerMsg::Subscribe { interval_ms: Wire::get(input)? },
+            0 => ViewerMsg::Subscribe { interval_ms: Wire::get(input)?, detail: Wire::get(input)? },
             1 => ViewerMsg::Bye,
             _ => return Err(bad("unknown viewer message")),
         })
@@ -263,6 +347,28 @@ wire_struct!(Mem { total, available, cached, swap_total, swap_used });
 wire_struct!(Disk { total, used });
 wire_struct!(Io { read, write });
 wire_struct!(Gpu { power, util, mem_used, shared_used, temp_c, power_w, clock_mhz });
+wire_struct!(Workloads { list, top });
+wire_struct!(Workload { id, kind, label, model, ports, procs, started_s, cpu, rss, gpus, gpu_idle_s, cmdline });
+wire_struct!(WorkloadGpu { gpu, mem, busy });
+wire_struct!(Proc { pid, name, cpu, rss, gpu_mem });
+
+impl Wire for Kind {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.push(match self {
+            Kind::Inference => 0,
+            Kind::Training => 1,
+            Kind::Cpu => 2,
+        });
+    }
+    fn get(input: &mut &[u8]) -> io::Result<Self> {
+        Ok(match u8::get(input)? {
+            0 => Kind::Inference,
+            1 => Kind::Training,
+            2 => Kind::Cpu,
+            _ => return Err(bad("unknown workload kind")),
+        })
+    }
+}
 
 impl Wire for Vendor {
     fn put(&self, out: &mut Vec<u8>) {
@@ -347,6 +453,23 @@ mod tests {
                 ..Default::default()
             }),
             AgentMsg::Error("nvml: not found".into()),
+            AgentMsg::Workloads(Workloads {
+                list: vec![Workload {
+                    id: 6291,
+                    kind: Kind::Inference,
+                    label: "llama-swap".into(),
+                    model: "Model-Q3_K_XL".into(),
+                    ports: vec![8080, 5810],
+                    procs: 2,
+                    started_s: 1,
+                    cpu: 0.5,
+                    rss: 1 << 30,
+                    gpus: vec![WorkloadGpu { gpu: 0, mem: 51 << 30, busy: Some(90) }],
+                    gpu_idle_s: 0,
+                    cmdline: String::new(),
+                }],
+                top: vec![Proc { pid: 1, name: "x".into(), cpu: 1.0, rss: 2, gpu_mem: 0 }],
+            }),
         ];
         for msg in msgs {
             let frame = Frame { route: vec![3], msg };

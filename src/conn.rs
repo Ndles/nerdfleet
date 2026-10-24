@@ -8,7 +8,7 @@ use crate::proto::{read_frame, write_frame, PROTOCOL_VERSION};
 use crate::remote::{self, AgentBuild, Ssh};
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -36,9 +36,43 @@ pub struct Shared {
     pub stop: AtomicBool,
     /// The running `ssh` or local agent of each host, to end on quit.
     pub children: Mutex<Vec<Option<u32>>>,
+    /// Per host: whether the user is looking at it closely, so its agent
+    /// should send detail.
+    pub detail: Vec<AtomicBool>,
+    /// Per host: the live agent's stdin, for telling it so.
+    pub writers: Vec<Mutex<Option<ChildStdin>>>,
 }
 
 impl Shared {
+    pub fn new(agent: AgentBuild, control_dir: PathBuf, interval_ms: u32, hosts: usize) -> Shared {
+        Shared {
+            agent,
+            control_dir,
+            interval_ms,
+            stop: AtomicBool::new(false),
+            children: Mutex::new(vec![None; hosts]),
+            detail: (0..hosts).map(|_| AtomicBool::new(false)).collect(),
+            writers: (0..hosts).map(|_| Mutex::new(None)).collect(),
+        }
+    }
+
+    fn subscribe(&self, index: usize) -> Frame<ViewerMsg> {
+        let detail = self.detail[index].load(Ordering::SeqCst);
+        Frame { route: Vec::new(), msg: ViewerMsg::Subscribe { interval_ms: self.interval_ms, detail } }
+    }
+
+    /// Asks host `index` for detail, or to stop sending it.
+    pub fn set_detail(&self, index: usize, on: bool) {
+        if self.detail[index].swap(on, Ordering::SeqCst) == on {
+            return;
+        }
+        if let Some(w) = self.writers[index].lock().unwrap().as_mut() {
+            // A failed write means the connection is ending; the next one
+            // subscribes with the new setting.
+            let _ = write_frame(w, &self.subscribe(index));
+        }
+    }
+
     /// Ends every connection. Remote agents see their stdin close and exit.
     pub fn shutdown(&self, hosts: &[Host]) {
         self.stop.store(true, Ordering::SeqCst);
@@ -148,7 +182,7 @@ fn talk(index: usize, mut cmd: Command, alias: &str, shared: &Shared, tx: &Sende
     };
     shared.children.lock().unwrap()[index] = Some(child.id());
     let stderr = collect_stderr(&mut child);
-    let mut stdin = child.stdin.take().expect("piped");
+    let mut stdin = Some(child.stdin.take().expect("piped"));
     let mut stdout = std::io::BufReader::new(child.stdout.take().expect("piped"));
 
     let mut greeted = false;
@@ -159,10 +193,11 @@ fn talk(index: usize, mut cmd: Command, alias: &str, shared: &Shared, tx: &Sende
                     break Err(anyhow::anyhow!("the agent speaks protocol {}, this viewer {PROTOCOL_VERSION}", h.protocol));
                 }
                 greeted = true;
-                let subscribe = Frame { route: Vec::new(), msg: ViewerMsg::Subscribe { interval_ms: shared.interval_ms } };
-                if let Err(e) = write_frame(&mut stdin, &subscribe) {
+                let mut w = stdin.take().expect("taken once");
+                if let Err(e) = write_frame(&mut w, &shared.subscribe(index)) {
                     break Err(e.into());
                 }
+                *shared.writers[index].lock().unwrap() = Some(w);
                 let _ = tx.send(Event::State(index, State::Live));
             }
             Ok(Some(_)) if !greeted => break Err(anyhow::anyhow!("the agent did not say hello")),
@@ -178,6 +213,7 @@ fn talk(index: usize, mut cmd: Command, alias: &str, shared: &Shared, tx: &Sende
         }
     };
     drop(stdin);
+    shared.writers[index].lock().unwrap().take();
     // After a clean end of stream, let the process exit on its own: its
     // exit code says whether the agent was missing. Kill only one that
     // lingers, or one that sent bad data.

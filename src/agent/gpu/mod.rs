@@ -13,16 +13,41 @@
 //! all day without keeping the GPU awake.
 
 mod amd;
+mod drm;
 mod nvml;
 mod pciids;
 mod smi;
 
 use crate::model::{Gpu, GpuInfo, Power, Vendor};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// GPU memory below which an idle NVIDIA GPU has no processes worth listing.
+const IDLE_MEM: u64 = 256 << 20;
+
+/// GPU memory above which a process counts as computing even without
+/// compute-engine time: a loaded model waiting for requests.
+const COMPUTE_MEM: u64 = 1 << 30;
+
+/// One process's use of one GPU.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcGpu {
+    /// Index into the inventory's GPUs.
+    pub gpu: u16,
+    pub mem: u64,
+    pub busy: Option<u8>,
+    /// Real compute work (an NVML compute process, AMD compute-engine time,
+    /// or a lot of memory), as opposed to drawing a window.
+    pub compute: bool,
+}
+
 /// How often an awake but idle GPU that could power off is looked at.
 const REST: Duration = Duration::from_secs(30);
+/// How often NVIDIA GPUs are asked. Each NVML query is a driver call of a
+/// millisecond or so, which at every sample was most of the agent's cost on
+/// a two-GPU host; in between, the last answer is reused.
+const NVIDIA_EVERY: Duration = Duration::from_millis(1900);
 
 enum Backend {
     Amd(amd::Amd),
@@ -47,6 +72,10 @@ struct Entry {
     busy: bool,
     /// When it was last measured idle.
     rested: Option<Instant>,
+    /// What the last sample found.
+    last_power: Power,
+    /// NVIDIA only: the last answer, reused until `NVIDIA_EVERY` passes.
+    cached: Option<Gpu>,
 }
 
 pub struct Gpus {
@@ -58,6 +87,12 @@ pub struct Gpus {
     /// before: starting NVML would wake them all.
     nvidia_ready: bool,
     smi: Option<PathBuf>,
+    drm: drm::Drm,
+    /// When NVIDIA GPUs were last asked, and whether this sample did.
+    nvidia_at: Option<Instant>,
+    nvidia_fresh: bool,
+    /// NVML's compute processes per GPU index, as of `nvidia_at`.
+    nvidia_procs: Vec<(u16, nvml::NvProc)>,
 }
 
 fn read_hex(path: &Path) -> Option<u32> {
@@ -66,7 +101,7 @@ fn read_hex(path: &Path) -> Option<u32> {
 }
 
 fn suspended(pci: &Path) -> bool {
-    std::fs::read_to_string(pci.join("power/runtime_status")).is_ok_and(|s| s.trim() == "suspended")
+    super::read_file(pci.join("power/runtime_status")).is_ok_and(|s| s.trim() == "suspended")
 }
 
 fn driver(pci: &Path) -> Option<String> {
@@ -142,9 +177,29 @@ impl Gpus {
                 }
                 _ => Backend::None,
             };
-            entries.push(Entry { info, pci, backend, can_sleep, was_awake: false, busy: false, rested: None });
+            entries.push(Entry {
+                info,
+                pci,
+                backend,
+                can_sleep,
+                was_awake: false,
+                busy: false,
+                rested: None,
+                last_power: Power::Asleep,
+                cached: None,
+            });
         }
-        let mut gpus = Gpus { entries, nvml: None, handles: Vec::new(), nvidia_ready: false, smi: None };
+        let mut gpus = Gpus {
+            entries,
+            nvml: None,
+            handles: Vec::new(),
+            nvidia_ready: false,
+            smi: None,
+            drm: Default::default(),
+            nvidia_at: None,
+            nvidia_fresh: false,
+            nvidia_procs: Vec::new(),
+        };
         let problems = gpus.start_nvidia().into_iter().collect();
         (gpus, problems)
     }
@@ -220,22 +275,41 @@ impl Gpus {
             })
             .collect();
         self.start_nvml(&power, problems);
-        let awake = |kind: fn(&Backend) -> bool| self.entries.iter().zip(&power).any(|(e, p)| kind(&e.backend) && *p == Power::Awake);
+        let nvidia = |b: &Backend| matches!(b, Backend::Nvml | Backend::Smi);
+        // Ask NVIDIA when it is time, or when a GPU just woke and has no
+        // answer to reuse.
+        self.nvidia_fresh = self.nvidia_at.is_none_or(|t| t.elapsed() >= NVIDIA_EVERY)
+            || self.entries.iter().zip(&power).any(|(e, p)| nvidia(&e.backend) && *p == Power::Awake && e.cached.is_none());
+        if self.nvidia_fresh {
+            self.nvidia_at = Some(Instant::now());
+        }
         let smi = match &self.smi {
-            Some(path) if awake(|b| matches!(b, Backend::Smi)) => smi::query(path),
+            Some(path)
+                if self.nvidia_fresh
+                    && self.entries.iter().zip(&power).any(|(e, p)| matches!(e.backend, Backend::Smi) && *p == Power::Awake) =>
+            {
+                smi::query(path)
+            }
             _ => Vec::new(),
         };
+        let (nvml, handles, fresh) = (&self.nvml, &self.handles, self.nvidia_fresh);
         let samples: Vec<Gpu> = self
             .entries
-            .iter()
+            .iter_mut()
             .zip(power.iter().copied())
             .map(|(e, power)| {
                 if power != Power::Awake {
+                    e.cached = None;
                     return Gpu { power, ..Default::default() };
                 }
-                match &e.backend {
+                if nvidia(&e.backend) && !fresh {
+                    if let Some(g) = &e.cached {
+                        return g.clone();
+                    }
+                }
+                let g = match &e.backend {
                     Backend::Amd(amd) => amd.sample(),
-                    Backend::Nvml => match (&self.nvml, self.handles.iter().find(|h| h.bus == e.info.bus)) {
+                    Backend::Nvml => match (nvml, handles.iter().find(|h| h.bus == e.info.bus)) {
                         (Some(lib), Some(h)) => lib.sample(h),
                         _ => Gpu::default(),
                     },
@@ -243,10 +317,15 @@ impl Gpus {
                         smi.iter().find(|(bus, _)| *bus == e.info.bus).map(|(_, g)| g.clone()).unwrap_or_default()
                     }
                     Backend::None => Gpu::default(),
+                };
+                if nvidia(&e.backend) {
+                    e.cached = Some(g.clone());
                 }
+                g
             })
             .collect();
         for ((e, g), p) in self.entries.iter_mut().zip(&samples).zip(&power) {
+            e.last_power = *p;
             if *p == Power::Awake {
                 e.busy = g.util.is_some_and(|u| u > 0);
                 if !e.busy {
@@ -256,6 +335,51 @@ impl Gpus {
         }
         self.release_nvml();
         samples
+    }
+
+    /// Which processes use which GPU, as of the last `sample`. GPUs that
+    /// were left alone then are left alone now: NVML is only asked while
+    /// it is started, which it is only for GPUs being measured.
+    pub fn processes(&mut self) -> HashMap<u32, Vec<ProcGpu>> {
+        let mut out: HashMap<u32, Vec<ProcGpu>> = HashMap::new();
+        for (pid, uses) in self.drm.sample() {
+            for u in uses {
+                let Some(i) = self.entries.iter().position(|e| e.info.bus == u.bus) else { continue };
+                let mem = u.vram + u.gtt;
+                out.entry(pid).or_default().push(ProcGpu {
+                    gpu: i as u16,
+                    mem,
+                    busy: u.busy,
+                    compute: u.compute || mem >= COMPUTE_MEM,
+                });
+            }
+        }
+        if self.nvidia_fresh {
+            self.nvidia_procs.clear();
+            if let Some(lib) = self.nvml.as_ref().filter(|l| l.started()) {
+                for (i, e) in self.entries.iter().enumerate() {
+                    if !matches!(e.backend, Backend::Nvml) || e.last_power != Power::Awake {
+                        continue;
+                    }
+                    // An idle GPU with no memory in use has nobody on it to
+                    // list. A driver keeps a few MiB for itself.
+                    let g = e.cached.as_ref();
+                    if g.is_some_and(|g| g.util == Some(0) && g.mem_used.is_some_and(|m| m < IDLE_MEM)) {
+                        continue;
+                    }
+                    let Some(h) = self.handles.iter().find(|h| h.bus == e.info.bus) else { continue };
+                    self.nvidia_procs.extend(lib.processes(h).into_iter().map(|p| (i as u16, p)));
+                }
+            }
+        }
+        for (i, p) in &self.nvidia_procs {
+            // A GPU that went to sleep since has no processes.
+            if self.entries[*i as usize].last_power != Power::Awake {
+                continue;
+            }
+            out.entry(p.pid).or_default().push(ProcGpu { gpu: *i, mem: p.mem.unwrap_or(0), busy: p.sm, compute: true });
+        }
+        out
     }
 
     /// Starts NVML when an NVIDIA GPU it measures is to be measured.

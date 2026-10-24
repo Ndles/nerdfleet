@@ -12,6 +12,12 @@ use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
 type Ret = c_int;
 type Device = *mut c_void;
 const SUCCESS: Ret = 0;
+const ERROR_INSUFFICIENT_SIZE: Ret = 7;
+/// The clock is asked every this many samples.
+const CLOCK_EVERY: u8 = 5;
+/// What NVML reports for a value it may not show (another user's process
+/// memory, without privileges).
+const VALUE_NOT_AVAILABLE: u64 = u64::MAX;
 const TEMPERATURE_GPU: c_int = 0;
 const CLOCK_GRAPHICS: c_int = 0;
 
@@ -40,6 +46,28 @@ struct PciInfo {
     bus_id: [c_char; 32],
 }
 
+/// `nvmlProcessInfo_t`, as the `_v3` process lists fill it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcessInfo {
+    pid: c_uint,
+    used_gpu_memory: u64,
+    gpu_instance_id: c_uint,
+    compute_instance_id: c_uint,
+}
+
+/// `nvmlProcessUtilizationSample_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcessUtil {
+    pid: c_uint,
+    time_stamp: u64,
+    sm_util: c_uint,
+    mem_util: c_uint,
+    enc_util: c_uint,
+    dec_util: c_uint,
+}
+
 struct Api {
     init: unsafe extern "C" fn() -> Ret,
     shutdown: unsafe extern "C" fn() -> Ret,
@@ -53,6 +81,18 @@ struct Api {
     power: unsafe extern "C" fn(Device, *mut c_uint) -> Ret,
     power_limit: unsafe extern "C" fn(Device, *mut c_uint) -> Ret,
     clock: unsafe extern "C" fn(Device, c_int, *mut c_uint) -> Ret,
+    /// Missing from older drivers; per-process numbers are then unknown.
+    compute_procs: Option<unsafe extern "C" fn(Device, *mut c_uint, *mut ProcessInfo) -> Ret>,
+    proc_util: Option<unsafe extern "C" fn(Device, *mut ProcessUtil, *mut c_uint, u64) -> Ret>,
+}
+
+/// One process computing on an NVIDIA GPU.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NvProc {
+    pub pid: u32,
+    pub mem: Option<u64>,
+    /// Share of the GPU's streaming multiprocessors, 0 to 100.
+    pub sm: Option<u8>,
 }
 
 /// The loaded library. Loading does not touch the GPUs; `start` does, and
@@ -71,6 +111,12 @@ pub struct NvGpu {
     pub bus: String,
     pub mem_total: Option<u64>,
     pub power_limit_w: Option<f32>,
+    /// The newest utilization sample seen, so each query returns only
+    /// newer ones.
+    last_util: std::cell::Cell<u64>,
+    /// The clock, and how many more samples reuse it: it changes slowly,
+    /// and every NVML call is a driver call.
+    clock: std::cell::Cell<(Option<u32>, u8)>,
 }
 
 // SAFETY: NVML handles are plain identifiers, and NVML is documented as
@@ -112,6 +158,8 @@ impl Nvml {
                 power: sym(lib, c"nvmlDeviceGetPowerUsage")?,
                 power_limit: sym(lib, c"nvmlDeviceGetEnforcedPowerLimit")?,
                 clock: sym(lib, c"nvmlDeviceGetClockInfo")?,
+                compute_procs: sym(lib, c"nvmlDeviceGetComputeRunningProcesses_v3").ok(),
+                proc_util: sym(lib, c"nvmlDeviceGetProcessUtilization").ok(),
             };
             Ok(Nvml { api, started: false })
         }
@@ -176,7 +224,15 @@ impl Nvml {
                     let mem_total = ((a.memory)(handle, &mut mem) == SUCCESS).then_some(mem.total);
                     let mut mw: c_uint = 0;
                     let power_limit_w = ((a.power_limit)(handle, &mut mw) == SUCCESS).then(|| mw as f32 / 1000.0);
-                    Some(NvGpu { handle, name, bus, mem_total, power_limit_w })
+                    Some(NvGpu {
+                        handle,
+                        name,
+                        bus,
+                        mem_total,
+                        power_limit_w,
+                        last_util: Default::default(),
+                        clock: Default::default(),
+                    })
                 })
                 .collect()
         }
@@ -195,7 +251,14 @@ impl Nvml {
             let mut mem: Memory = std::mem::zeroed();
             let mut temp: c_uint = 0;
             let mut mw: c_uint = 0;
-            let mut mhz: c_uint = 0;
+            let (mut clock, left) = d.clock.get();
+            if left == 0 {
+                let mut mhz: c_uint = 0;
+                clock = ((a.clock)(h, CLOCK_GRAPHICS, &mut mhz) == SUCCESS).then_some(mhz);
+                d.clock.set((clock, CLOCK_EVERY - 1));
+            } else {
+                d.clock.set((clock, left - 1));
+            }
             Gpu {
                 power: Power::Awake,
                 util: ((a.utilization)(h, &mut util) == SUCCESS).then(|| util.gpu.min(100) as u8),
@@ -203,9 +266,81 @@ impl Nvml {
                 shared_used: None,
                 temp_c: ((a.temperature)(h, TEMPERATURE_GPU, &mut temp) == SUCCESS).then_some(temp as f32),
                 power_w: ((a.power)(h, &mut mw) == SUCCESS).then(|| mw as f32 / 1000.0),
-                clock_mhz: ((a.clock)(h, CLOCK_GRAPHICS, &mut mhz) == SUCCESS).then_some(mhz),
+                clock_mhz: clock,
             }
         }
+    }
+}
+
+impl Nvml {
+    /// The processes computing on `d` (not those only drawing on it), with
+    /// their memory and recent share of the GPU.
+    pub fn processes(&self, d: &NvGpu) -> Vec<NvProc> {
+        let Some(list) = self.api.compute_procs.filter(|_| self.started) else { return Vec::new() };
+        // SAFETY: the two-call pattern NVML documents: ask for the count,
+        // then pass a buffer of that many (plus room for processes starting
+        // in between), and retry if it still grew. `n` always holds the
+        // buffer's real length when NVML writes into it.
+        let procs: Vec<ProcessInfo> = unsafe {
+            let mut n: c_uint = 0;
+            let mut buf: Vec<ProcessInfo> = Vec::new();
+            let mut ok = false;
+            for _ in 0..3 {
+                buf = vec![std::mem::zeroed(); n as usize + 8];
+                n = buf.len() as c_uint;
+                match list(d.handle, &mut n, buf.as_mut_ptr()) {
+                    SUCCESS => {
+                        ok = true;
+                        break;
+                    }
+                    ERROR_INSUFFICIENT_SIZE => continue,
+                    _ => break,
+                }
+            }
+            if !ok {
+                return Vec::new();
+            }
+            buf.truncate((n as usize).min(buf.len()));
+            buf
+        };
+        let mut sm: std::collections::HashMap<u32, (u64, u32)> = std::collections::HashMap::new();
+        // Whether NVML gave samples this time. Without them a process's share
+        // is unknown, not zero: NVML also says "no samples" when its sampling
+        // window and ours do not line up.
+        let mut sampled = false;
+        // The slowest call there is: only with someone to ask about.
+        if let Some(util) = self.api.proc_util.filter(|_| !procs.is_empty()) {
+            // SAFETY: as above; NVML fills at most `n` samples and sets `n`
+            // to how many it wrote.
+            unsafe {
+                let mut n: c_uint = 0;
+                let since = d.last_util.get();
+                if util(d.handle, std::ptr::null_mut(), &mut n, since) == ERROR_INSUFFICIENT_SIZE && n > 0 {
+                    let mut buf: Vec<ProcessUtil> = vec![std::mem::zeroed(); (n as usize).min(4096)];
+                    n = buf.len() as c_uint;
+                    if util(d.handle, buf.as_mut_ptr(), &mut n, since) == SUCCESS && n > 0 {
+                        sampled = true;
+                        for s in &buf[..(n as usize).min(buf.len())] {
+                            // Keep each process's newest sample.
+                            let e = sm.entry(s.pid).or_insert((0, 0));
+                            if s.time_stamp >= e.0 {
+                                *e = (s.time_stamp, s.sm_util);
+                            }
+                            d.last_util.set(d.last_util.get().max(s.time_stamp));
+                        }
+                    }
+                }
+            }
+        }
+        procs
+            .iter()
+            .map(|p| NvProc {
+                pid: p.pid,
+                mem: (p.used_gpu_memory != VALUE_NOT_AVAILABLE).then_some(p.used_gpu_memory),
+                // With samples, a process without one did not run.
+                sm: sampled.then(|| sm.get(&p.pid).map_or(0, |s| s.1.min(100) as u8)),
+            })
+            .collect()
     }
 }
 
@@ -230,7 +365,9 @@ mod tests {
     }
 
     #[test]
-    fn pci_info_has_nvmls_layout() {
+    fn structs_have_nvmls_layout() {
         assert_eq!(std::mem::size_of::<PciInfo>(), 68);
+        assert_eq!(std::mem::size_of::<ProcessInfo>(), 24);
+        assert_eq!(std::mem::size_of::<ProcessUtil>(), 32);
     }
 }

@@ -1,6 +1,7 @@
 //! The viewer: the TUI you look at.
 
 mod app;
+mod host;
 mod ui;
 
 use crate::config::Config;
@@ -12,10 +13,17 @@ use crossterm::{execute, terminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// What the screen shows.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Overview,
+    /// One host up close, with a workload selected.
+    Host { host: usize, workload: usize },
+}
 
 /// Puts the terminal back however the viewer ends, panics included.
 struct Screen;
@@ -49,13 +57,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
     // The look comes from nerdmux's config, so the two tools feel like one.
     let theme = nerdmux::config::Config::load().theme;
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
-    let shared = Arc::new(Shared {
-        agent: AgentBuild::current()?,
-        control_dir,
-        interval_ms: config.interval_ms,
-        stop: AtomicBool::new(false),
-        children: Mutex::new(vec![None; config.hosts.len()]),
-    });
+    let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir, config.interval_ms, config.hosts.len()));
 
     let (tx, rx) = mpsc::channel();
     for (i, host) in config.hosts.iter().enumerate() {
@@ -69,6 +71,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let mut scroll = 0u16;
     let mut dirty = true;
     let mut last_draw = Instant::now();
+    let mut mode = Mode::Overview;
     let result = loop {
         // Agent news first, all of it, then at most one redraw.
         while let Ok(ev) = rx.try_recv() {
@@ -82,8 +85,18 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         if dirty || last_draw.elapsed() > Duration::from_secs(1) {
             let drawn = term.draw(|f| {
                 let area = f.area();
-                ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
-                    .draw(area, f.buffer_mut());
+                match mode {
+                    Mode::Overview => ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
+                        .draw(area, f.buffer_mut()),
+                    Mode::Host { host, workload } => host::HostUi {
+                        theme: &theme,
+                        host: &hosts[host],
+                        selected: workload,
+                        own_bg: theme.own_palette,
+                        interval_ms: config.interval_ms,
+                    }
+                    .draw(area, f.buffer_mut()),
+                }
             });
             if let Err(e) = drawn {
                 break Err(e.into());
@@ -101,6 +114,26 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     || k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL
                 {
                     break Ok(());
+                }
+                if let Mode::Host { host, workload } = mode {
+                    let n = hosts[host].workloads.list.len();
+                    match k.code {
+                        KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
+                            shared.set_detail(host, false);
+                            mode = Mode::Overview;
+                        }
+                        KeyCode::Up => mode = Mode::Host { host, workload: workload.saturating_sub(1) },
+                        KeyCode::Down => mode = Mode::Host { host, workload: (workload + 1).min(n.saturating_sub(1)) },
+                        _ => {}
+                    }
+                    continue;
+                }
+                if k.code == KeyCode::Enter && !hosts.is_empty() {
+                    // Looking closely: ask that host for command lines and
+                    // its busiest processes.
+                    shared.set_detail(selected, true);
+                    mode = Mode::Host { host: selected, workload: 0 };
+                    continue;
                 }
                 // Arrows move, with or without Alt (nerdmux's pane keys).
                 if !(k.modifiers - KeyModifiers::ALT).is_empty() || hosts.is_empty() {
@@ -143,18 +176,14 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
     };
     let host = config.hosts[index].clone();
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
-    let shared = Arc::new(Shared {
-        agent: AgentBuild::current()?,
-        control_dir,
-        interval_ms: 1000,
-        stop: AtomicBool::new(false),
-        children: Mutex::new(vec![None; config.hosts.len()]),
-    });
+    let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir, 1000, config.hosts.len()));
+    shared.set_detail(index, true);
     let (tx, rx) = mpsc::channel();
     conn::spawn(index, host.clone(), shared.clone(), tx);
     let mut view = HostView::new(&host);
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut samples = 0;
+    let probe_samples = 36;
     let result = loop {
         let Ok(ev) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) else {
             break Err(anyhow::anyhow!("no answer within a minute"));
@@ -166,11 +195,13 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
                 match &msg {
                     AgentMsg::Hello(h) => println!("agent {} ({}), protocol {}", h.version, h.target, h.protocol),
                     AgentMsg::Error(e) => println!("agent problem: {e}"),
-                    AgentMsg::Inventory(_) => {}
+                    AgentMsg::Inventory(_) | AgentMsg::Workloads(_) => {}
                     AgentMsg::Sample(_) => samples += 1,
                 }
                 view.apply(msg);
-                if samples == 2 {
+                // Long enough for per-process rates, and for a busy CPU job to
+                // have lasted the 30 seconds that make it a workload.
+                if samples == probe_samples {
                     break Ok(());
                 }
             }
@@ -190,6 +221,29 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
         println!("gpu{i} {} {} [{}] unified={} metrics={}", g.vendor.label(), g.name, g.bus, g.unified, g.metrics);
         println!("     total vram {:?} shared {:?} limit {:?}W", g.mem_total.map(ui::gib), g.shared_total.map(ui::gib), g.power_limit_w);
         println!("     {x:?}");
+    }
+    for w in &view.workloads.list {
+        let gpus: Vec<String> = w
+            .gpus
+            .iter()
+            .map(|g| format!("gpu{} {} {}", g.gpu, ui::gib(g.mem), g.busy.map_or("?".into(), |b| format!("{b}%"))))
+            .collect();
+        println!(
+            "work {} · {}{} · {} procs · {:.1} cores · {} · ports {:?} · {}{}",
+            w.kind.label(),
+            w.label,
+            if w.model.is_empty() { String::new() } else { format!(" · {}", w.model) },
+            w.procs,
+            w.cpu,
+            ui::gib(w.rss),
+            w.ports,
+            gpus.join(", "),
+            if w.gpu_idle_s > 0 { format!(" · GPUs idle {}s", w.gpu_idle_s) } else { String::new() },
+        );
+        println!("     $ {}", w.cmdline);
+    }
+    for p in &view.workloads.top {
+        println!("top  {:>7} {:<20} {:>5.1} cores {:>7} gpu {}", p.pid, p.name, p.cpu, ui::gib(p.rss), ui::gib(p.gpu_mem));
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 use crate::config::Host;
 use crate::conn::State;
-use crate::model::{AgentMsg, Inventory, Sample};
+use crate::model::{AgentMsg, Inventory, Sample, Workloads};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -16,6 +16,10 @@ pub struct HostView {
     pub state: State,
     pub inventory: Option<Inventory>,
     pub sample: Option<Sample>,
+    /// Samples taken since the viewer started: the absolute position of
+    /// the newest history point, which keeps graphs steady as they scroll.
+    pub samples: u64,
+    pub workloads: Workloads,
     pub last_seen: Option<Instant>,
     pub cpu: VecDeque<u64>,
     pub mem: VecDeque<u64>,
@@ -38,6 +42,8 @@ impl HostView {
             state: State::Connecting,
             inventory: None,
             sample: None,
+            samples: 0,
+            workloads: Workloads::default(),
             last_seen: None,
             cpu: VecDeque::new(),
             mem: VecDeque::new(),
@@ -66,8 +72,16 @@ impl HostView {
                 for (series, g) in self.gpus.iter_mut().zip(&s.gpus) {
                     push(series, g.util.unwrap_or(0) as u64);
                 }
+                self.samples += 1;
                 self.last_seen = Some(Instant::now());
                 self.sample = Some(s);
+            }
+            AgentMsg::Workloads(w) => {
+                // GPU references must point into the inventory.
+                let gpus = self.inventory.as_ref().map_or(0, |i| i.gpus.len());
+                if w.list.iter().all(|wl| wl.gpus.iter().all(|g| (g.gpu as usize) < gpus)) {
+                    self.workloads = w;
+                }
             }
             AgentMsg::Error(e) => {
                 if !self.problems.contains(&e) {

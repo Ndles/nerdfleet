@@ -7,7 +7,7 @@ is spread over GPU boxes, Macs serving models and clusters.
 A TUI that runs on Linux and macOS, built on [nerdmux](../nerdmux). NVIDIA, AMD and Intel GPUs are found on any host,
 including mixed ones, and unified-memory machines (AMD APUs) show the shared memory their models actually live in.
 
-Early days: phase 1 of [the design](docs/design.md), an overview of live hosts, is working.
+Early days: phases 1 and 2 of [the design](docs/design.md), live hosts and what they are doing, are working.
 
 ## Build
 
@@ -41,7 +41,13 @@ nerdfleet check           # what is wrong with the config, if anything
 nerdfleet probe gpu-box   # connect to one host and print what it reports
 ```
 
-Arrows (or `Alt+arrows`, as in nerdmux) move between hosts; `q` or `Ctrl+C` quits.
+Arrows (or `Alt+arrows`, as in nerdmux) move between hosts, `Enter` opens one, `Esc` goes back, and `q` or `Ctrl+C`
+quits.
+
+Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
+(`CPU`), named the way you would name them (`torchrun train.py`, `llama-swap · Qwen3-8B-Q4_K_M`). The host view adds
+graphs, every GPU in full, each workload's processes and command line (with keys and passwords masked on the host),
+and the busiest processes.
 
 ## How it reaches hosts
 

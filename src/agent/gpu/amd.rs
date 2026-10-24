@@ -12,7 +12,7 @@ pub struct Amd {
 }
 
 fn read_u64(path: &Path) -> Option<u64> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    crate::agent::read_file(path).ok()?.trim().parse().ok()
 }
 
 impl Amd {

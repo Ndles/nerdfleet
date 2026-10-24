@@ -271,7 +271,9 @@ Metrics endpoints are fetched under these rules:
 - with a short timeout and a response size limit;
 - with no credentials, ever.
 
-A server that needs an API key for `/metrics` simply goes without those numbers.
+A server that needs an API key for `/metrics` simply goes without those numbers. On the development APU box every
+llama endpoint (`/metrics`, `/slots`, `/props`, llama-swap's `/running`) needs a key, so fetching them is not built
+yet; nerdfleet would show nothing more there.
 
 ### Training
 
@@ -308,6 +310,89 @@ tokenization, evaluation, builds. The tree is shown as one workload under its to
 
 The agent only looks at the user's own processes unless the OS lets it see others read-only (Linux usually does for
 command lines, not for fdinfo). It never reads process environments.
+
+### As built (phase 2, Linux)
+
+**Jobs.**
+- A job is a process and everything under it, named after its top process: the highest ancestor that is not a
+  boundary (shells, terminals, multiplexers, `sshd`, `sudo`, `systemd`, container shims, Claude Code) and has the same
+  owner.
+- A job keeps its id, the top process's pid, while processes under it come and go. llama-swap swapping models stays
+  one workload.
+
+**What counts as GPU use.** Only real compute, because desktop software holds GPUs open all day:
+- an NVML *compute* process (not the graphics list);
+- AMD compute-engine time since the last sample;
+- more than 1 GiB of GPU memory, which covers a loaded model waiting for requests.
+
+Compositors, Xwayland, browsers, launchers, terminals and similar programs never become workloads. A process started
+under one becomes a job of its own, so a Jupyter kernel started from VS Code is still a workload.
+
+**Kinds.**
+- **Inference:** a job with a known model server (by program, by Python module, or a virtualenv tool run as
+  `python /venv/bin/vllm`).
+  - Listening on a port is not enough. Training listens too: PyTorch's rendezvous store, NCCL's bootstrap sockets,
+    W&B's local service, Jupyter.
+  - A server nerdfleet does not know shows as training until the config names it (`[[workload]]` rules, still to be
+    built).
+- **Training:** a compute job otherwise.
+- **CPU:** a job above 2 cores for 30 seconds, until it drops below 1 core.
+
+**Names.**
+- Labels look through interpreters and wrappers (`time`, `nice`, `taskset`, `numactl`, `timeout`, `env`, `stdbuf`,
+  `nohup`). `/usr/bin/time -v uv run python scripts/export.py --jobs 12` reads `uv export.py`.
+- Model names come from `--alias`, `--served-model-name`, `--model`/`-m` (not Python's `-m`), `--hf-repo`, and `serve`
+  or `run` arguments. A file path becomes its stem without `.gguf` or shard numbers.
+- A model server with no model running is "no model loaded".
+
+**Per-process GPU use.**
+- **DRM fdinfo** (amdgpu, i915, xe): counted once per `(drm-pdev, drm-client-id)`. Memory is `drm-resident-*`, or
+  `drm-memory-*` on older kernels. Busy is the busiest engine's time delta divided by its capacity.
+- Processes using a GPU are found by reading every fd every 10 seconds; their fdinfo is read every pass.
+- **NVML:** `nvmlDeviceGetComputeRunningProcesses_v3` with the two-call pattern, plus per-process SM utilization.
+  Asked only when a GPU has work (utilization above zero or more than 256 MiB in use).
+- A job alone on a GPU without per-process numbers gets the GPU's own utilization.
+
+**The stall clock.** A training job's `gpu_idle_s` counts how long all its GPUs have stayed under 5%.
+- It runs only on known numbers. An unknown share resets it, so a job is never called stalled for lack of data.
+- A job alone on a GPU counts as at least as busy as the GPU itself.
+- NVML's per-process share is unknown when NVML returns no samples, not zero.
+- The viewer calls out 10 minutes as possibly stalled; the alert in phase 3 will use the same clock.
+
+**Secrets.**
+- Command lines go to the viewer only in detail mode (the host view), with these masked on the host:
+  - the values after flags whose names contain key, token, secret, passw, auth, credential, cookie or bearer;
+  - `NAME=VALUE` settings whose name looks secret or is all caps (`HF_TOKEN=...`, `api_key=...`);
+  - `user:pass@` in URLs.
+- Settings such as Hydra's `lr=3e-4 model=llama` stay readable.
+- Cards show only the derived label and model.
+
+**Detail mode.** The viewer sends `Subscribe { detail: true }` for the host being viewed, and then the agent also
+sends command lines and the eight busiest processes.
+
+### Agent cost
+
+Measured on 2026-10-24 over 60 seconds of CPU ticks, with nothing else changed:
+
+| Host                                       | Before tuning | After      |
+|--------------------------------------------|---------------|------------|
+| Two NVIDIA GPUs plus an iGPU, ~600 processes | 2.25% of a core | 0.42%    |
+| APU, ~440 processes                        | 1.13%         | 0.47%      |
+
+What it took:
+- **Reading `/proc` files into a buffer with room for a page.** `fs::read_to_string` probes zero-size files with a
+  series of small reads: 43k reads per 12 s, down to 10k.
+- **Reading the process table and working out workloads every 2 s** rather than every sample. The kernel spends about
+  10 µs describing each process.
+- **Listing listening sockets only when a job needs its ports.** Walking every socket took about 1.8 ms.
+- **Fewer NVML driver calls**, each about a millisecond:
+  - GPUs asked every 2 s, with the answer reused in between;
+  - the clock asked every 10 s;
+  - process lists only for GPUs with work;
+  - per-process utilization only when there are processes.
+
+With training running, the process-list calls come back and the cost rises somewhat. That case is still to be
+measured.
 
 ## Alerts
 
@@ -596,6 +681,13 @@ Candidates to vet, none decided:
 2. **Workload and host view.**
    - Inference, training and high-CPU detectors, with per-process GPU usage (NVML, DRM fdinfo) and the stall check.
    - Graphs from history and the GPU panel.
+   - **Status (2026-10-24):**
+     - Inference checked live: llama-swap with a Vulkan llama-server on the APU box, and an idle Ollama on the laptop.
+     - CPU checked live: a 12-process data export on the GPU box.
+     - Desktop GPU users stay out.
+     - The host view opens with `Enter`.
+     - Not yet checked against a real training run: NVML's process structs (compare with `nvidia-smi
+       --query-compute-apps`), rank grouping, and the stall clock.
 3. **Resident mode and alerts.** The systemd user unit and its hardening, the three-resolution history and its file,
    the starter alerts, the alert log, and desktop notifications.
 4. **Terminals.** The two nerdmux changes, terminal panes, and the split layout.
