@@ -8,7 +8,7 @@ A TUI that runs on Linux and macOS, built on [nerdmux](../nerdmux). NVIDIA, AMD 
 including mixed ones, and unified-memory machines (AMD APUs) show the shared memory their models actually live in.
 
 Early days: phases 1 to 4 of [the design](docs/design.md) are working: live hosts and what they are doing,
-resident agents with alerts, and terminals.
+resident agents with alerts, and full-screen terminals.
 
 ## Build
 

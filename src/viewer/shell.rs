@@ -26,7 +26,7 @@ pub const SESSION: &str = "fleet";
 /// a command line, so one with anything but plain characters is skipped.
 const SHELL_SCRIPT: &str = "for n in nerdmux \"$HOME/.local/bin/nerdmux\" \"$HOME/.cargo/bin/nerdmux\"; do \
     m=\"$(command -v \"$n\" 2>/dev/null)\" || continue; \
-    case \"$m\" in *[^A-Za-z0-9/._-]*) continue;; esac; \
+    printf %s \"$m\" | grep -q \"[^A-Za-z0-9/._-]\" && continue; \
     \"$m\" --help 2>/dev/null | grep -q -- --plain || continue; \
     exec \"${SHELL:-/bin/sh}\" -l -c \"exec $m attach --plain -t fleet\"; done; \
     echo \"nerdfleet: no nerdmux with --plain on this host, so this shell ends with the connection.\"; \
@@ -181,6 +181,42 @@ mod tests {
         assert!(is_escape(&KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL)));
         assert!(!is_escape(&KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE)));
         assert!(!is_escape(&KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL | KeyModifiers::ALT)));
+    }
+
+    /// Runs the script under `shell` with `HOME` set to `home` and a PATH
+    /// without nerdmux, and returns what it printed.
+    fn run_script(shell: &str, home: &Path) -> String {
+        let out = std::process::Command::new(shell)
+            .arg("-c")
+            .arg(SHELL_SCRIPT)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("SHELL", "/bin/sh")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    }
+
+    #[test]
+    fn the_script_finds_nerdmux_off_path_under_every_sh() {
+        use std::os::unix::fs::PermissionsExt;
+        // Ubuntu's sh is dash, which reads `[^...]` in a case pattern
+        // literally; the script must not depend on it.
+        let home = std::env::temp_dir().join(format!("nerdfleet-found-{}", std::process::id()));
+        let bin = home.join(".cargo/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("nerdmux");
+        std::fs::write(&fake, "#!/bin/sh\nif [ \"$1\" = --help ]; then echo 'attach --plain'; else echo \"ran $*\"; fi\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for shell in ["sh", "dash", "bash"] {
+            if std::process::Command::new(shell).arg("-c").arg("true").output().is_err() {
+                continue;
+            }
+            let text = run_script(shell, &home);
+            assert!(text.contains("ran attach --plain -t fleet"), "{shell}: {text}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

@@ -553,7 +553,8 @@ the same keys (`Alt+Space`, `Alt+arrows`) and show two status bars. Instead, ner
 status bar, no key bindings, every key passed through, so it only keeps the session alive. If nerdmux is not on the
 host, the pane falls back to plain `ssh -t` and says that the shell will not survive a disconnect.
 
-**As built (phase 4, 2026-10-25).** Checked on the Arch laptop (local, with nerdmux) and on host-a (over SSH, without).
+**As built (phase 4, 2026-10-25).** Checked on the Arch laptop (local, with nerdmux) and on host-a (over SSH; its
+nerdmux in `~/.cargo/bin` predates `--plain`, so it got the fallback).
 
 - **Keys.** `s` opens a shell on the selected host from the overview, or on the host in view. It is full screen, under
   a one-line bar naming the host and the way back. Every key goes to the shell except `Ctrl+]`, which goes back to the
@@ -562,7 +563,9 @@ host, the pane falls back to plain `ssh -t` and says that the shell will not sur
 - **One shell per host.** It lives as long as the viewer. When it ends (the user typed `exit`, the connection dropped)
   the bar says so and `Enter` starts a new one; with nerdmux on the host, that one attaches to the same session.
 - **What runs.** A fixed script, the same on every host, that looks for a nerdmux whose `--help` mentions `--plain`
-  on PATH, in `~/.local/bin` and in `~/.cargo/bin` (non-interactive SSH rarely has the last two on PATH). It starts
+  on PATH, in `~/.local/bin` and in `~/.cargo/bin` (non-interactive SSH rarely has the last two on PATH). Paths with
+  anything but plain characters are skipped, checked with `grep`: dash, Ubuntu's `sh`, reads `[^...]` in a `case`
+  pattern literally. It starts
   `nerdmux attach --plain -t fleet` through the user's login shell, so the session's shells get a login PATH. Without
   one it prints why and starts a login shell. On this machine nerdfleet runs nerdmux, or `$SHELL`, directly.
 - **A server of its own.** `attach --plain` uses `plain.sock` beside nerdmux's default socket, so the fleet session
@@ -826,7 +829,8 @@ Candidates to vet, none decided:
    - **Status (2026-10-25):** full-screen terminals built (see [Terminals](#terminals)). Checked live: on the laptop a
      shell in the fleet session, back and forth with `Ctrl+]`, the session surviving the viewer and reattached by
      the next one; on host-a the fallback login shell, with the host's own umask and no agent forwarding. Not built:
-     the split layout. nerdmux is not on host-a or host-b yet, so their shells do not survive a disconnect.
+     the split layout. host-a's nerdmux predates `--plain` and host-b has none, so their shells do not survive a
+     disconnect until a current nerdmux is installed there.
 5. **Clusters.**
    - Relay, `job-step` access, the Slurm adapter and the cluster view.
    - Tested later, against a local Slurm in containers first and a real cluster when one is available.
