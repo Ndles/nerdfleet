@@ -1,0 +1,204 @@
+//! One thread per host: connect, put the agent there if needed, pass its
+//! messages to the viewer, and try again with growing pauses when the host
+//! goes away.
+
+use crate::config::{Access, Host};
+use crate::model::{AgentMsg, Frame, ViewerMsg};
+use crate::proto::{read_frame, write_frame, PROTOCOL_VERSION};
+use crate::remote::{self, AgentBuild, Ssh};
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum State {
+    Connecting,
+    Deploying,
+    Live,
+    /// Why, and when the next try is.
+    Down(String, Instant),
+}
+
+pub enum Event {
+    State(usize, State),
+    Agent(usize, AgentMsg),
+}
+
+/// What every host thread shares.
+pub struct Shared {
+    pub agent: AgentBuild,
+    pub control_dir: PathBuf,
+    pub interval_ms: u32,
+    pub stop: AtomicBool,
+    /// The running `ssh` or local agent of each host, to end on quit.
+    pub children: Mutex<Vec<Option<u32>>>,
+}
+
+impl Shared {
+    /// Ends every connection. Remote agents see their stdin close and exit.
+    pub fn shutdown(&self, hosts: &[Host]) {
+        self.stop.store(true, Ordering::SeqCst);
+        for pid in self.children.lock().unwrap().iter().flatten() {
+            // SAFETY: signalling a child we started; at worst it is gone.
+            unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
+        }
+        for h in hosts {
+            if let Access::Ssh(alias) = &h.access {
+                if let Ok(ssh) = Ssh::new(alias, &self.control_dir) {
+                    ssh.close();
+                }
+            }
+        }
+    }
+}
+
+pub fn spawn(index: usize, host: Host, shared: Arc<Shared>, tx: Sender<Event>) {
+    std::thread::spawn(move || {
+        let mut pause = Duration::from_secs(2);
+        while !shared.stop.load(Ordering::SeqCst) {
+            let _ = tx.send(Event::State(index, State::Connecting));
+            let started = Instant::now();
+            let why = match session(index, &host, &shared, &tx) {
+                Ok(()) => "the agent stopped".to_string(),
+                Err(e) => format!("{e:#}"),
+            };
+            if shared.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            // A connection that held for a while was not a flapping one.
+            if started.elapsed() > Duration::from_secs(60) {
+                pause = Duration::from_secs(2);
+            }
+            let _ = tx.send(Event::State(index, State::Down(why, Instant::now() + pause)));
+            let until = Instant::now() + pause;
+            while Instant::now() < until && !shared.stop.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            pause = (pause * 2).min(Duration::from_secs(60));
+        }
+    });
+}
+
+/// Keeps the last few kilobytes a child writes to stderr, for error messages.
+fn collect_stderr(child: &mut Child) -> Arc<Mutex<String>> {
+    let buf = Arc::new(Mutex::new(String::new()));
+    if let Some(mut err) = child.stderr.take() {
+        let buf = buf.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 1024];
+            while let Ok(n @ 1..) = err.read(&mut chunk) {
+                let mut b = buf.lock().unwrap();
+                b.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                if b.len() > 4096 {
+                    let cut = b.len() - 4096;
+                    let cut = (cut..b.len()).find(|&i| b.is_char_boundary(i)).unwrap_or(b.len());
+                    b.drain(..cut);
+                }
+            }
+        });
+    }
+    buf
+}
+
+enum Ended {
+    /// The agent file is missing or not the one we expect: upload, retry.
+    NeedsAgent,
+    Done(anyhow::Result<()>),
+}
+
+fn session(index: usize, host: &Host, shared: &Shared, tx: &Sender<Event>) -> anyhow::Result<()> {
+    match &host.access {
+        Access::Local => {
+            let mut cmd = Command::new(remote::self_exe());
+            cmd.args(["agent", "--stdio"]);
+            match talk(index, cmd, "local", shared, tx) {
+                Ended::NeedsAgent => anyhow::bail!("the local agent did not start"),
+                Ended::Done(r) => r,
+            }
+        }
+        Access::Ssh(alias) => {
+            let ssh = Ssh::new(alias, &shared.control_dir)?;
+            let target = ssh.probe()?;
+            if target != shared.agent.target {
+                anyhow::bail!("the host is {target}, and this nerdfleet only carries an agent for {}", shared.agent.target);
+            }
+            if let Ended::Done(r) = talk(index, ssh.run(&shared.agent), alias, shared, tx) {
+                return r;
+            }
+            let _ = tx.send(Event::State(index, State::Deploying));
+            ssh.upload(&shared.agent)?;
+            let _ = tx.send(Event::State(index, State::Connecting));
+            match talk(index, ssh.run(&shared.agent), alias, shared, tx) {
+                Ended::NeedsAgent => anyhow::bail!("the agent was copied but would not start"),
+                Ended::Done(r) => r,
+            }
+        }
+    }
+}
+
+/// Runs one agent connection to its end.
+fn talk(index: usize, mut cmd: Command, alias: &str, shared: &Shared, tx: &Sender<Event>) -> Ended {
+    let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(c) => c,
+        Err(e) => return Ended::Done(Err(anyhow::anyhow!("cannot start {}: {e}", cmd.get_program().to_string_lossy()))),
+    };
+    shared.children.lock().unwrap()[index] = Some(child.id());
+    let stderr = collect_stderr(&mut child);
+    let mut stdin = child.stdin.take().expect("piped");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("piped"));
+
+    let mut greeted = false;
+    let result = loop {
+        match read_frame::<_, Frame<AgentMsg>>(&mut stdout) {
+            Ok(Some(Frame { msg: AgentMsg::Hello(h), .. })) if !greeted => {
+                if h.protocol != PROTOCOL_VERSION {
+                    break Err(anyhow::anyhow!("the agent speaks protocol {}, this viewer {PROTOCOL_VERSION}", h.protocol));
+                }
+                greeted = true;
+                let subscribe = Frame { route: Vec::new(), msg: ViewerMsg::Subscribe { interval_ms: shared.interval_ms } };
+                if let Err(e) = write_frame(&mut stdin, &subscribe) {
+                    break Err(e.into());
+                }
+                let _ = tx.send(Event::State(index, State::Live));
+            }
+            Ok(Some(_)) if !greeted => break Err(anyhow::anyhow!("the agent did not say hello")),
+            // Relayed frames (clusters) are not used yet.
+            Ok(Some(Frame { route, .. })) if !route.is_empty() => {}
+            Ok(Some(Frame { msg, .. })) => {
+                if tx.send(Event::Agent(index, msg)).is_err() {
+                    break Ok(());
+                }
+            }
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(anyhow::anyhow!("bad data from the agent: {e}")),
+        }
+    };
+    drop(stdin);
+    // After a clean end of stream, let the process exit on its own: its
+    // exit code says whether the agent was missing. Kill only one that
+    // lingers, or one that sent bad data.
+    if result.is_ok() {
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until && matches!(child.try_wait(), Ok(None)) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    let _ = child.kill();
+    let status = child.wait();
+    shared.children.lock().unwrap()[index] = None;
+    let code = status.ok().and_then(|s| s.code());
+    if !greeted && matches!(code, Some(remote::EXIT_MISSING | remote::EXIT_MISMATCH)) {
+        return Ended::NeedsAgent;
+    }
+    // Give the stderr thread a moment to catch the last words.
+    std::thread::sleep(Duration::from_millis(50));
+    let err = stderr.lock().unwrap().clone();
+    match result {
+        Ok(()) if !greeted => Ended::Done(Err(anyhow::anyhow!(remote::explain(code, &err, alias)))),
+        r => Ended::Done(r),
+    }
+}
