@@ -2,6 +2,7 @@
 
 mod app;
 mod host;
+mod shell;
 mod ui;
 
 use crate::config::Config;
@@ -10,7 +11,9 @@ use crate::remote::AgentBuild;
 use app::HostView;
 use crossterm::event::{self as term, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
+use nerdmux::pane::PaneEvent;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use std::path::Path;
 use std::sync::mpsc;
@@ -23,6 +26,8 @@ enum Mode {
     Overview,
     /// One host up close, with a workload selected.
     Host { host: usize, workload: usize, window: usize },
+    /// A terminal on a host, full screen.
+    Shell { host: usize },
 }
 
 /// Puts the terminal back however the viewer ends, panics included.
@@ -31,7 +36,12 @@ struct Screen;
 impl Screen {
     fn enter() -> anyhow::Result<Screen> {
         terminal::enable_raw_mode()?;
-        execute!(std::io::stdout(), terminal::EnterAlternateScreen, crossterm::cursor::Hide)?;
+        execute!(
+            std::io::stdout(),
+            terminal::EnterAlternateScreen,
+            crossterm::cursor::Hide,
+            crossterm::event::EnableBracketedPaste
+        )?;
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             Screen::restore();
@@ -41,7 +51,12 @@ impl Screen {
     }
 
     fn restore() {
-        let _ = execute!(std::io::stdout(), terminal::LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = execute!(
+            std::io::stdout(),
+            crossterm::event::DisableBracketedPaste,
+            terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -52,12 +67,28 @@ impl Drop for Screen {
     }
 }
 
+/// What the viewer waits for besides agent news: terminal output, and
+/// whatever the user does.
+enum Wake {
+    Pane(PaneEvent),
+    Input(TermEvent),
+}
+
+impl From<PaneEvent> for Wake {
+    fn from(e: PaneEvent) -> Wake {
+        Wake::Pane(e)
+    }
+}
+
+/// Shortest time between two frames while a terminal is busy.
+const FRAME: Duration = Duration::from_millis(12);
+
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let config = Config::load(config_path)?;
     // The look comes from nerdmux's config, so the two tools feel like one.
     let theme = nerdmux::config::Config::load().theme;
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
-    let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir, config.interval_ms, config.hosts.len()));
+    let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir.clone(), config.interval_ms, config.hosts.len()));
 
     let (tx, rx) = mpsc::channel();
     for (i, host) in config.hosts.iter().enumerate() {
@@ -72,13 +103,153 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
 
     let screen = Screen::enter()?;
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+    // Input is read on a thread of its own, so the loop wakes as soon as
+    // either a key or terminal output arrives.
+    let (wake_tx, wake_rx) = mpsc::sync_channel::<Wake>(256);
+    {
+        let tx = wake_tx.clone();
+        std::thread::Builder::new().name("input".into()).spawn(move || {
+            while let Ok(ev) = term::read() {
+                if tx.send(Wake::Input(ev)).is_err() {
+                    break;
+                }
+            }
+        })?;
+    }
+    // One terminal per host at most, kept while the dashboard shows.
+    let mut shells: Vec<Option<shell::Shell>> = config.hosts.iter().map(|_| None).collect();
+    let mut next_shell = 0u32;
+    let mut before_shell = Mode::Overview;
     let mut selected = 0usize;
     let mut scroll = 0u16;
     let mut dirty = true;
     let mut last_draw = Instant::now();
     let mut mode = Mode::Overview;
-    let result = loop {
-        // Agent news first, all of it, then at most one redraw.
+    let result = 'main: loop {
+        // Terminal output and input first, then agent news, then at most
+        // one redraw.
+        let wait = if dirty { FRAME.saturating_sub(last_draw.elapsed()) } else { Duration::from_millis(100) };
+        let mut woke = wake_rx.recv_timeout(wait).ok();
+        while let Some(w) = woke.take().or_else(|| wake_rx.try_recv().ok()) {
+            match w {
+                Wake::Pane(PaneEvent::Output(id, bytes)) => {
+                    if let Some((i, s)) = find_shell(&mut shells, id) {
+                        s.feed(&bytes);
+                        dirty |= mode == Mode::Shell { host: i };
+                    }
+                }
+                Wake::Pane(PaneEvent::Eof(id) | PaneEvent::Exit(id)) => {
+                    if let Some((_, s)) = find_shell(&mut shells, id) {
+                        s.ended = true;
+                        dirty = true;
+                    }
+                }
+                Wake::Input(TermEvent::Resize(cols, rows)) => {
+                    for s in shells.iter_mut().flatten() {
+                        s.pane.resize(cols, rows.saturating_sub(1));
+                    }
+                    dirty = true;
+                }
+                Wake::Input(TermEvent::Paste(text)) => {
+                    if let Mode::Shell { host } = mode {
+                        if let Some(s) = shells[host].as_mut().filter(|s| !s.ended) {
+                            s.pane.send_paste(&text);
+                        }
+                    }
+                }
+                Wake::Input(TermEvent::Key(k)) if k.kind != KeyEventKind::Release => {
+                    dirty = true;
+                    // In a terminal every key is the shell's, but one.
+                    if let Mode::Shell { host } = mode {
+                        let Some(s) = shells[host].as_mut() else { continue };
+                        if shell::is_escape(&k) {
+                            mode = before_shell;
+                        } else if s.ended {
+                            if k.code == KeyCode::Enter {
+                                shells[host] = None;
+                                match open_shell(&config.hosts[host], &control_dir, &mut next_shell, &term, &wake_tx) {
+                                    Ok(s) => shells[host] = Some(s),
+                                    Err(e) => hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}"))),
+                                }
+                            }
+                        } else if let Some(key) = nerdmux::client::convert_key(k) {
+                            s.pane.send_key(key.normalized());
+                        }
+                        continue;
+                    }
+                    if k.code == KeyCode::Char('q') && k.modifiers.is_empty()
+                        || k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL
+                    {
+                        break 'main Ok(());
+                    }
+                    // `s`: a shell on the host in view, or the selected one.
+                    if k.code == KeyCode::Char('s') && k.modifiers.is_empty() && !hosts.is_empty() {
+                        let host = match mode {
+                            Mode::Host { host, .. } => host,
+                            _ => selected,
+                        };
+                        if shells[host].as_ref().is_none_or(|s| s.ended) {
+                            shells[host] = None;
+                            match open_shell(&config.hosts[host], &control_dir, &mut next_shell, &term, &wake_tx) {
+                                Ok(s) => shells[host] = Some(s),
+                                Err(e) => {
+                                    hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
+                                    continue;
+                                }
+                            }
+                        }
+                        before_shell = mode;
+                        mode = Mode::Shell { host };
+                        continue;
+                    }
+                    if let Mode::Host { host, workload, window } = mode {
+                        let n = hosts[host].workloads.list.len();
+                        match k.code {
+                            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
+                                shared.set_detail(host, false);
+                                mode = Mode::Overview;
+                            }
+                            KeyCode::Up => mode = Mode::Host { host, workload: workload.saturating_sub(1), window },
+                            KeyCode::Down => {
+                                mode = Mode::Host { host, workload: (workload + 1).min(n.saturating_sub(1)), window }
+                            }
+                            KeyCode::Char('t') => {
+                                mode = Mode::Host { host, workload, window: (window + 1) % host::WINDOWS.len() }
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if k.code == KeyCode::Enter && !hosts.is_empty() {
+                        // Looking closely: ask that host for command lines and
+                        // its busiest processes.
+                        shared.set_detail(selected, true);
+                        mode = Mode::Host { host: selected, workload: 0, window: 0 };
+                        continue;
+                    }
+                    // Arrows move, with or without Alt (nerdmux's pane keys).
+                    if !(k.modifiers - KeyModifiers::ALT).is_empty() || hosts.is_empty() {
+                        continue;
+                    }
+                    let cols = cols(term.size()?.width, hosts.len());
+                    let n = hosts.len();
+                    match k.code {
+                        KeyCode::Left => selected = selected.saturating_sub(1),
+                        KeyCode::Right => selected = (selected + 1).min(n - 1),
+                        KeyCode::Up => selected = selected.saturating_sub(cols),
+                        KeyCode::Down if selected + cols < n => selected += cols,
+                        _ => {}
+                    }
+                }
+                Wake::Input(_) => {}
+            }
+        }
+        // A program may start a synchronized update and never end it.
+        let now = Instant::now();
+        for s in shells.iter_mut().flatten() {
+            dirty |= s.pane.flush_stale_sync(now);
+        }
+
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 Event::State(i, s) => hosts[i].set_state(s),
@@ -105,86 +276,66 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             dirty = true;
         }
         // Countdowns on down hosts tick even when nothing arrives.
-        if dirty || last_draw.elapsed() > Duration::from_secs(1) {
-            let drawn = term.draw(|f| {
-                let area = f.area();
-                match mode {
-                    Mode::Overview => ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
-                        .draw(area, f.buffer_mut()),
-                    Mode::Host { host, workload, window } => host::HostUi {
-                        theme: &theme,
-                        host: &hosts[host],
-                        selected: workload,
-                        own_bg: theme.own_palette,
-                        window,
-                    }
-                    .draw(area, f.buffer_mut()),
-                }
-            });
-            if let Err(e) = drawn {
-                break Err(e.into());
-            }
-            dirty = false;
-            last_draw = Instant::now();
-        }
-        if !term::poll(Duration::from_millis(100))? {
+        let due = dirty && last_draw.elapsed() >= FRAME || last_draw.elapsed() > Duration::from_secs(1);
+        if !due {
             continue;
         }
-        match term::read()? {
-            TermEvent::Key(k) if k.kind != KeyEventKind::Release => {
-                dirty = true;
-                if k.code == KeyCode::Char('q') && k.modifiers.is_empty()
-                    || k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL
-                {
-                    break Ok(());
+        let drawn = term.draw(|f| {
+            let area = f.area();
+            match mode {
+                Mode::Overview => ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
+                    .draw(area, f.buffer_mut()),
+                Mode::Host { host, workload, window } => host::HostUi {
+                    theme: &theme,
+                    host: &hosts[host],
+                    selected: workload,
+                    own_bg: theme.own_palette,
+                    window,
                 }
-                if let Mode::Host { host, workload, window } = mode {
-                    let n = hosts[host].workloads.list.len();
-                    match k.code {
-                        KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
-                            shared.set_detail(host, false);
-                            mode = Mode::Overview;
+                .draw(area, f.buffer_mut()),
+                Mode::Shell { host } => {
+                    let Some(s) = shells[host].as_mut() else { return };
+                    let bar = Rect { height: 1.min(area.height), ..area };
+                    let body = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
+                    let buf = f.buffer_mut();
+                    shell::draw_bar(buf, bar, &theme, &hosts[host].name, s);
+                    nerdmux::render::draw_pane(buf, &mut [], body, &mut s.pane, &theme, !s.ended, s.ended);
+                    if let Some(c) = s.pane.cursor().filter(|_| !s.ended) {
+                        if c.col < body.width && c.row < body.height {
+                            f.set_cursor_position((body.x + c.col, body.y + c.row));
                         }
-                        KeyCode::Up => mode = Mode::Host { host, workload: workload.saturating_sub(1), window },
-                        KeyCode::Down => {
-                            mode = Mode::Host { host, workload: (workload + 1).min(n.saturating_sub(1)), window }
-                        }
-                        KeyCode::Char('t') => {
-                            mode = Mode::Host { host, workload, window: (window + 1) % host::WINDOWS.len() }
-                        }
-                        _ => {}
                     }
-                    continue;
-                }
-                if k.code == KeyCode::Enter && !hosts.is_empty() {
-                    // Looking closely: ask that host for command lines and
-                    // its busiest processes.
-                    shared.set_detail(selected, true);
-                    mode = Mode::Host { host: selected, workload: 0, window: 0 };
-                    continue;
-                }
-                // Arrows move, with or without Alt (nerdmux's pane keys).
-                if !(k.modifiers - KeyModifiers::ALT).is_empty() || hosts.is_empty() {
-                    continue;
-                }
-                let cols = cols(term.size()?.width, hosts.len());
-                let n = hosts.len();
-                match k.code {
-                    KeyCode::Left => selected = selected.saturating_sub(1),
-                    KeyCode::Right => selected = (selected + 1).min(n - 1),
-                    KeyCode::Up => selected = selected.saturating_sub(cols),
-                    KeyCode::Down if selected + cols < n => selected += cols,
-                    _ => {}
                 }
             }
-            TermEvent::Resize(..) => dirty = true,
-            _ => {}
+        });
+        if let Err(e) = drawn {
+            break Err(e.into());
         }
+        dirty = false;
+        last_draw = Instant::now();
     };
+    drop(shells);
     drop(term);
     drop(screen);
     shared.shutdown(&config.hosts);
     result
+}
+
+fn find_shell(shells: &mut [Option<shell::Shell>], id: u32) -> Option<(usize, &mut shell::Shell)> {
+    shells.iter_mut().enumerate().find_map(|(i, s)| s.as_mut().filter(|s| s.id == id).map(|s| (i, s)))
+}
+
+/// A terminal on `host` the size of the screen below the bar.
+fn open_shell(
+    host: &crate::config::Host,
+    control_dir: &Path,
+    next: &mut u32,
+    term: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    tx: &mpsc::SyncSender<Wake>,
+) -> anyhow::Result<shell::Shell> {
+    let size = term.size()?;
+    *next += 1;
+    shell::open(host, control_dir, *next, size.width, size.height.saturating_sub(1), tx.clone())
 }
 
 /// A desktop notification, when the desktop has a way to show one. The

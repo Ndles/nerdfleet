@@ -84,7 +84,7 @@ impl HostUi<'_> {
             left.push(Span::styled(" not live ", Style::default().fg(t.red)));
         }
         Line::from(left).render(bar_area, buf);
-        let keys = "↑↓ workload  t window  Esc back  q quit ";
+        let keys = "↑↓ workload  t window  s shell  Esc back  q quit ";
         let kw = keys.chars().count() as u16;
         if area.width > kw + 30 {
             Span::styled(keys, dim).render(Rect { x: area.x + area.width - kw, width: kw, ..bar_area }, buf);

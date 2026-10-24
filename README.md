@@ -1,13 +1,14 @@
 # nerdfleet
 
 Watch a fleet of machines from one terminal: what each one is training or serving, how hard its CPUs, memory and
-GPUs are working, and (soon) a shell on any of them a keystroke away. For AI/ML engineers and researchers whose work
+GPUs are working, and a shell on any of them a keystroke away. For AI/ML engineers and researchers whose work
 is spread over GPU boxes, Macs serving models and clusters.
 
 A TUI that runs on Linux and macOS, built on [nerdmux](../nerdmux). NVIDIA, AMD and Intel GPUs are found on any host,
 including mixed ones, and unified-memory machines (AMD APUs) show the shared memory their models actually live in.
 
-Early days: phases 1 and 2 of [the design](docs/design.md), live hosts and what they are doing, are working.
+Early days: phases 1 to 4 of [the design](docs/design.md) are working: live hosts and what they are doing,
+resident agents with alerts, and terminals.
 
 ## Build
 
@@ -42,7 +43,9 @@ nerdfleet probe gpu-box   # connect to one host and print what it reports
 ```
 
 Arrows (or `Alt+arrows`, as in nerdmux) move between hosts, `Enter` opens one, `Esc` goes back, and `q` or `Ctrl+C`
-quits.
+quits. `s` opens a shell on the host, full screen; `Ctrl+]` goes back to the dashboard and `s` returns to it. With
+[nerdmux](../nerdmux) on the host the shell lives in a nerdmux session, so it survives a dropped connection and the
+next `s` picks it up; without it, you get a plain login shell, and the terminal says so.
 
 Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
 (`CPU`), named the way you would name them (`torchrun train.py`, `llama-swap · Qwen3-8B-Q4_K_M`). The host view adds

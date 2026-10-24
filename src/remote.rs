@@ -132,10 +132,16 @@ impl Ssh {
     /// to `ssh` directly, never through a local shell.
     fn base(&self) -> Command {
         let mut cmd = Command::new("ssh");
-        cmd.arg("-T");
+        // Fail instead of prompting where nobody can see the prompt.
+        cmd.args(["-T", "-o", "BatchMode=yes"]);
+        cmd.args(self.options());
+        cmd
+    }
+
+    /// The options shared by every connection, as `-o` arguments.
+    fn options(&self) -> Vec<String> {
+        let mut out = Vec::new();
         for opt in [
-            // Fail instead of prompting where nobody can see the prompt.
-            "BatchMode=yes",
             // One sign-in per host, reused by every connection after it.
             "ControlMaster=auto",
             &format!("ControlPath={}/%C", self.control_dir.display()),
@@ -149,9 +155,23 @@ impl Ssh {
             "ClearAllForwardings=yes",
             "PermitLocalCommand=no",
         ] {
-            cmd.arg("-o").arg(opt);
+            out.push("-o".into());
+            out.push(opt.to_string());
         }
-        cmd
+        out
+    }
+
+    /// The command line for a terminal running `script` on the host: with
+    /// a remote terminal, and free to ask for a password or a second
+    /// factor, since a terminal pane is where the user can answer. The
+    /// sign-in is shared with the agent's connection like any other.
+    pub fn terminal(&self, script: &str) -> Vec<String> {
+        let mut argv = vec!["ssh".to_string(), "-t".to_string()];
+        argv.extend(self.options());
+        // Without PREPARE: its umask would carry over into the user's shell.
+        assert!(!script.contains('\'') && !script.contains('!') && !script.contains('\\'));
+        argv.extend(["--".to_string(), self.alias.clone(), format!("sh -c '{script}'")]);
+        argv
     }
 
     pub(crate) fn script(&self, script: &str, args: &[&str]) -> Command {
