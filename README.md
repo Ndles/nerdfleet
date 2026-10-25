@@ -54,6 +54,9 @@ nerdfleet check           # what is wrong with the config, if anything
 nerdfleet probe gpu-box   # connect to one host and print what it reports
 ```
 
+Colors come from `~/.config/nerd-theme.toml`, the theme the Nërd tools share; see
+[nerdmux](https://github.com/Ndles/nerdmux#configuration) for what it can set.
+
 Arrows (or `Alt+arrows`, as in nerdmux) move between hosts, `Enter` opens one, `Esc` goes back, and `q` or `Ctrl+C`
 quits. `s` opens a shell on the host, full screen; `Ctrl+]` goes back to the dashboard and `s` returns to it. With
 [nerdmux](../nerdmux) on the host the shell lives in a nerdmux session, so it survives a dropped connection and the

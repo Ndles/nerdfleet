@@ -88,6 +88,14 @@ fn with_host(name: &str, f: impl FnOnce(&config::Host, &std::path::Path) -> anyh
 }
 
 fn check() -> anyhow::Result<()> {
+    let theme = nerdmux::embed::theme_path();
+    if theme.exists() {
+        let problems = nerdmux::embed::check_theme();
+        println!("{}: {}", theme.display(), if problems.is_empty() { "fine" } else { "used, except" });
+        for p in problems {
+            println!("  {p}");
+        }
+    }
     let path = paths::config_path();
     let c = config::Config::load(&path)?;
     if !path.exists() {

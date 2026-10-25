@@ -85,7 +85,7 @@ const FRAME: Duration = Duration::from_millis(12);
 
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let config = Config::load(config_path)?;
-    // The look comes from nerdmux's config, so the two tools feel like one.
+    // The look every Nërd tool shares, from ~/.config/nerd-theme.toml.
     let theme = nerdmux::embed::load_theme();
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
     let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir.clone(), config.interval_ms, config.hosts.len()));

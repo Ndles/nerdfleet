@@ -8,7 +8,7 @@ license = "MIT"
 rust-version = "1.85"
 
 [dependencies]
-nerdmux = { git = "https://github.com/Ndles/nerdmux", rev = "aff8c0549403553079001ed36d9c91d57d332ce7" }
+nerdmux = { git = "https://github.com/Ndles/nerdmux", rev = "ec2a7966ddb2896f77b70ef5608eb5b1aa07b78f" }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm", "underline-color"] }
 crossterm = "0.28"
 serde = { version = "1", features = ["derive"] }
