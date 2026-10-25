@@ -1,4 +1,7 @@
 //! The agent as the viewer sees it: started as a child, speaking frames.
+//!
+//! Linux only until the macOS agent samples anything (phase 6).
+#![cfg(target_os = "linux")]
 
 use nerdfleet::model::{AgentMsg, Frame, ViewerMsg};
 use nerdfleet::proto::{read_frame, write_frame, PROTOCOL_VERSION};

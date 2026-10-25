@@ -1,5 +1,8 @@
 //! A resident agent and a viewer attaching to it through `agent --stdio`,
 //! in scratch runtime and state directories.
+//!
+//! Linux only, like resident mode (systemd) itself for now.
+#![cfg(target_os = "linux")]
 
 use nerdfleet::model::{AgentMsg, Frame, ViewerMsg};
 use nerdfleet::proto::{read_frame, write_frame, PROTOCOL_VERSION};
@@ -36,7 +39,6 @@ fn term(mut c: Child) -> std::process::ExitStatus {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
 fn a_viewer_attaches_to_the_resident_agent_and_its_state_is_saved() {
     let run = scratch("run");
     let state = scratch("state");
@@ -95,7 +97,6 @@ fn a_viewer_attaches_to_the_resident_agent_and_its_state_is_saved() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
 fn an_older_resident_is_left_alone_and_the_viewer_is_told() {
     use nerdfleet::model::Hello;
     use std::os::unix::net::UnixListener;
