@@ -496,7 +496,7 @@ pub fn fit(s: &str, width: usize) -> String {
     out
 }
 
-fn wrap(s: &str, width: usize) -> Vec<String> {
+pub fn wrap(s: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut lines = vec![String::new()];
     for word in s.split(' ') {
