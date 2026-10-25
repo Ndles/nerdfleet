@@ -7,8 +7,7 @@
 
 use crate::config::{Access, Host};
 use crate::remote::Ssh;
-use nerdmux::config::Theme;
-use nerdmux::pane::{Notice, Pane, PaneEvent, SpawnOpts};
+use nerdmux::embed::{Notice, Options, Terminal, TerminalEvent, Theme};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -35,13 +34,13 @@ const SHELL_SCRIPT: &str = "for n in nerdmux \"$HOME/.local/bin/nerdmux\" \"$HOM
 pub struct Shell {
     /// Tells this pane's events from those of the one it replaced.
     pub id: u32,
-    pub pane: Pane,
+    pub pane: Terminal,
     /// The program ended, or the connection dropped.
     pub ended: bool,
 }
 
 /// Starts a terminal on `host`, `cols` by `rows`.
-pub fn open<E: From<PaneEvent> + Send + 'static>(
+pub fn open<E: From<TerminalEvent> + Send + 'static>(
     host: &Host,
     control_dir: &Path,
     id: u32,
@@ -55,18 +54,7 @@ pub fn open<E: From<PaneEvent> + Send + 'static>(
     };
     let env = environment();
     let cwd = std::env::var_os("HOME").map(Into::into);
-    let opts = SpawnOpts {
-        cols,
-        rows,
-        command,
-        cwd,
-        env: &env,
-        // Every host has terminfo for this one.
-        term: "xterm-256color",
-        scrollback: 10_000,
-        socket: None,
-    };
-    let pane = Pane::spawn(id, opts, tx)?;
+    let pane = Terminal::spawn(id, Options { cols, rows, command, cwd, env: &env }, tx)?;
     Ok(Shell { id, pane, ended: false })
 }
 
@@ -83,7 +71,7 @@ impl Shell {
 
     /// The title the program set, safe to draw.
     pub fn title(&self) -> String {
-        crate::text::clean(&self.pane.title).chars().take(80).collect()
+        crate::text::clean(self.pane.title()).chars().take(80).collect()
     }
 }
 

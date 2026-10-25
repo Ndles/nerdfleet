@@ -6,7 +6,7 @@ use super::ui::{fit, gib, kind_color, level, level_char, rate, short_name, span,
 use crate::history::NONE;
 use crate::conn::State;
 use crate::model::{Kind, Power};
-use nerdmux::config::Theme;
+use nerdmux::embed::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};

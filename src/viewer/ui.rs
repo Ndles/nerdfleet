@@ -7,7 +7,7 @@
 use super::app::HostView;
 use crate::conn::State;
 use crate::model::{Gpu, GpuInfo, Kind, Power, Vendor, Workload};
-use nerdmux::config::Theme;
+use nerdmux::embed::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};

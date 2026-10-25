@@ -11,7 +11,7 @@ use crate::remote::AgentBuild;
 use app::HostView;
 use crossterm::event::{self as term, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
-use nerdmux::pane::PaneEvent;
+use nerdmux::embed::TerminalEvent;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
@@ -70,12 +70,12 @@ impl Drop for Screen {
 /// What the viewer waits for besides agent news: terminal output, and
 /// whatever the user does.
 enum Wake {
-    Pane(PaneEvent),
+    Pane(TerminalEvent),
     Input(TermEvent),
 }
 
-impl From<PaneEvent> for Wake {
-    fn from(e: PaneEvent) -> Wake {
+impl From<TerminalEvent> for Wake {
+    fn from(e: TerminalEvent) -> Wake {
         Wake::Pane(e)
     }
 }
@@ -86,7 +86,7 @@ const FRAME: Duration = Duration::from_millis(12);
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let config = Config::load(config_path)?;
     // The look comes from nerdmux's config, so the two tools feel like one.
-    let theme = nerdmux::config::Config::load().theme;
+    let theme = nerdmux::embed::load_theme();
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
     let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir.clone(), config.interval_ms, config.hosts.len()));
 
@@ -132,13 +132,13 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         let mut woke = wake_rx.recv_timeout(wait).ok();
         while let Some(w) = woke.take().or_else(|| wake_rx.try_recv().ok()) {
             match w {
-                Wake::Pane(PaneEvent::Output(id, bytes)) => {
+                Wake::Pane(TerminalEvent::Output(id, bytes)) => {
                     if let Some((i, s)) = find_shell(&mut shells, id) {
                         s.feed(&bytes);
                         dirty |= mode == Mode::Shell { host: i };
                     }
                 }
-                Wake::Pane(PaneEvent::Eof(id) | PaneEvent::Exit(id)) => {
+                Wake::Pane(TerminalEvent::Eof(id) | TerminalEvent::Exit(id)) => {
                     if let Some((_, s)) = find_shell(&mut shells, id) {
                         s.ended = true;
                         dirty = true;
@@ -153,7 +153,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                 Wake::Input(TermEvent::Paste(text)) => {
                     if let Mode::Shell { host } = mode {
                         if let Some(s) = shells[host].as_mut().filter(|s| !s.ended) {
-                            s.pane.send_paste(&text);
+                            s.pane.paste(&text);
                         }
                     }
                 }
@@ -172,8 +172,8 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                                     Err(e) => hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}"))),
                                 }
                             }
-                        } else if let Some(key) = nerdmux::client::convert_key(k) {
-                            s.pane.send_key(key.normalized());
+                        } else {
+                            s.pane.send_key(k);
                         }
                         continue;
                     }
@@ -247,7 +247,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         // A program may start a synchronized update and never end it.
         let now = Instant::now();
         for s in shells.iter_mut().flatten() {
-            dirty |= s.pane.flush_stale_sync(now);
+            dirty |= s.pane.tick(now);
         }
 
         while let Ok(ev) = rx.try_recv() {
@@ -299,7 +299,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     let body = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
                     let buf = f.buffer_mut();
                     shell::draw_bar(buf, bar, &theme, &hosts[host].name, s);
-                    nerdmux::render::draw_pane(buf, &mut [], body, &mut s.pane, &theme, !s.ended, s.ended);
+                    s.pane.draw(buf, body, &theme, !s.ended);
                     if let Some(c) = s.pane.cursor().filter(|_| !s.ended) {
                         if c.col < body.width && c.row < body.height {
                             f.set_cursor_position((body.x + c.col, body.y + c.row));
@@ -534,7 +534,7 @@ mod tests {
     }
 
     fn render(hosts: &[HostView], width: u16, height: u16) -> String {
-        let theme = nerdmux::config::Theme::default();
+        let theme = nerdmux::embed::Theme::default();
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut scroll = 0;
