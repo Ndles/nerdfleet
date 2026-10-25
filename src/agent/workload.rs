@@ -36,25 +36,108 @@ const TOP: usize = 8;
 /// Programs that run other programs for the user. A job's top process is
 /// the one just below them.
 const BOUNDARY: &[&str] = &[
-    "systemd", "init", "sshd", "sshd-session", "login", "sudo", "su", "doas", "cron", "crond", "bash", "zsh", "fish",
-    "sh", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "tmux", "tmux: server", "screen", "SCREEN", "nerdmux", "zellij",
-    "gnome-terminal-", "konsole", "kitty", "alacritty", "foot", "ghostty", "wezterm-gui", "xterm", "claude", "code",
-    "containerd-shim", "containerd-shim-runc-v2", "conmon", "tini", "dumb-init", "docker-init", "uwsm", "hyprland",
+    "systemd",
+    "init",
+    "sshd",
+    "sshd-session",
+    "login",
+    "sudo",
+    "su",
+    "doas",
+    "cron",
+    "crond",
+    "bash",
+    "zsh",
+    "fish",
+    "sh",
+    "dash",
+    "ksh",
+    "tcsh",
+    "csh",
+    "nu",
+    "xonsh",
+    "tmux",
+    "tmux: server",
+    "screen",
+    "SCREEN",
+    "nerdmux",
+    "zellij",
+    "gnome-terminal-",
+    "konsole",
+    "kitty",
+    "alacritty",
+    "foot",
+    "ghostty",
+    "wezterm-gui",
+    "xterm",
+    "claude",
+    "code",
+    "containerd-shim",
+    "containerd-shim-runc-v2",
+    "conmon",
+    "tini",
+    "dumb-init",
+    "docker-init",
+    "uwsm",
+    "hyprland",
     "Hyprland",
 ];
 
 /// Desktop programs: they draw on GPUs, and are never workloads.
 const DESKTOP: &[&str] = &[
-    "Xorg", "Xwayland", "gnome-shell", "kwin_wayland", "kwin_x11", "mutter", "Hyprland", "sway", "river", "weston",
-    "gamescope", "plasmashell", "chrome", "chromium", "firefox", "firefox-bin", "brave", "electron", "walker",
-    "swayosd-server", "waybar", "mako", "hyprpaper", "swaybg", "mpv", "vlc", "obs", "gjs", "steam", "Discord", "slack",
-    "code", "kitty", "alacritty", "foot", "ghostty", "wezterm-gui",
+    "Xorg",
+    "Xwayland",
+    "gnome-shell",
+    "kwin_wayland",
+    "kwin_x11",
+    "mutter",
+    "Hyprland",
+    "sway",
+    "river",
+    "weston",
+    "gamescope",
+    "plasmashell",
+    "chrome",
+    "chromium",
+    "firefox",
+    "firefox-bin",
+    "brave",
+    "electron",
+    "walker",
+    "swayosd-server",
+    "waybar",
+    "mako",
+    "hyprpaper",
+    "swaybg",
+    "mpv",
+    "vlc",
+    "obs",
+    "gjs",
+    "steam",
+    "Discord",
+    "slack",
+    "code",
+    "kitty",
+    "alacritty",
+    "foot",
+    "ghostty",
+    "wezterm-gui",
 ];
 
 /// Model servers, by program name.
 const SERVERS: &[&str] = &[
-    "llama-server", "llama-swap", "ollama", "vllm", "text-generation-launcher", "text-generation-server", "lms",
-    "llamafile", "koboldcpp", "tabby", "localai", "local-ai",
+    "llama-server",
+    "llama-swap",
+    "ollama",
+    "vllm",
+    "text-generation-launcher",
+    "text-generation-server",
+    "lms",
+    "llamafile",
+    "koboldcpp",
+    "tabby",
+    "localai",
+    "local-ai",
 ];
 
 /// Model servers started as Python modules or subcommands.
@@ -113,7 +196,10 @@ const WRAPPERS: &[(&str, &[&str])] = &[
     ("ionice", &["-c", "-n", "--class", "--classdata"]),
     ("taskset", &[]),
     ("chrt", &[]),
-    ("numactl", &["-C", "-N", "-m", "-p", "-i", "--physcpubind", "--cpunodebind", "--membind", "--preferred", "--interleave"]),
+    (
+        "numactl",
+        &["-C", "-N", "-m", "-p", "-i", "--physcpubind", "--cpunodebind", "--membind", "--preferred", "--interleave"],
+    ),
     ("timeout", &["-s", "-k", "--signal", "--kill-after"]),
     ("env", &["-u", "--unset", "-C", "--chdir"]),
     ("stdbuf", &[]),
@@ -126,7 +212,9 @@ const WRAPPERS: &[(&str, &[&str])] = &[
 /// lose that too, as do `NAME=VALUE` settings for `env`.
 fn unwrapped(args: &[String]) -> &[String] {
     let mut rest = args;
-    'wrappers: while let Some((name, takes)) = rest.first().and_then(|a| WRAPPERS.iter().find(|(w, _)| *w == basename(a))) {
+    'wrappers: while let Some((name, takes)) =
+        rest.first().and_then(|a| WRAPPERS.iter().find(|(w, _)| *w == basename(a)))
+    {
         let mut i = 1;
         let positional = matches!(*name, "taskset" | "chrt" | "timeout");
         let mut skipped_positional = false;
@@ -325,16 +413,14 @@ impl Tracker {
 
         // Each process's job: walk up while the parent is ours and not a
         // boundary. Desktop programs and this agent stay out of jobs.
-        let root_of = |mut i: usize| {
-            loop {
-                let p = &procs[i];
-                let Some(&pi) = by_pid.get(&p.ppid) else { return i };
-                let parent = &procs[pi];
-                if parent.pid <= 1 || parent.uid != p.uid || listed(BOUNDARY, parent) || listed(DESKTOP, parent) {
-                    return i;
-                }
-                i = pi;
+        let root_of = |mut i: usize| loop {
+            let p = &procs[i];
+            let Some(&pi) = by_pid.get(&p.ppid) else { return i };
+            let parent = &procs[pi];
+            if parent.pid <= 1 || parent.uid != p.uid || listed(BOUNDARY, parent) || listed(DESKTOP, parent) {
+                return i;
             }
+            i = pi;
         };
         let mut jobs: HashMap<usize, Job> = HashMap::new();
         for (i, p) in procs.iter().enumerate() {
@@ -454,15 +540,22 @@ impl Tracker {
                 cpu: job.cpu,
                 rss: job.rss,
                 gpus,
-                gpu_idle_s: if kind == Kind::Training { now.duration_since(seen.gpu_busy_at).as_secs() as u32 } else { 0 },
+                gpu_idle_s: if kind == Kind::Training {
+                    now.duration_since(seen.gpu_busy_at).as_secs() as u32
+                } else {
+                    0
+                },
                 cmdline: if input.detail { redact(&top.args) } else { String::new() },
             });
         }
         self.seen.retain(|pid, _| alive.contains(pid));
         list.sort_by(|a, b| {
             let gpu_mem = |w: &Workload| w.gpus.iter().map(|g| g.mem).sum::<u64>();
-            (a.kind as u8, std::cmp::Reverse(gpu_mem(a)), std::cmp::Reverse((a.cpu * 100.0) as u64))
-                .cmp(&(b.kind as u8, std::cmp::Reverse(gpu_mem(b)), std::cmp::Reverse((b.cpu * 100.0) as u64)))
+            (a.kind as u8, std::cmp::Reverse(gpu_mem(a)), std::cmp::Reverse((a.cpu * 100.0) as u64)).cmp(&(
+                b.kind as u8,
+                std::cmp::Reverse(gpu_mem(b)),
+                std::cmp::Reverse((b.cpu * 100.0) as u64),
+            ))
         });
 
         let top = if input.detail {
@@ -565,15 +658,16 @@ mod tests {
         let procs = vec![
             proc(1, 0, "systemd", 0.0),
             proc(5, 1, "bash", 0.0),
-            proc(30, 5, "/home/u/.venv/bin/python /home/u/.venv/bin/torchrun --nproc-per-node 2 train.py --lr 3e-4", 0.1),
+            proc(
+                30,
+                5,
+                "/home/u/.venv/bin/python /home/u/.venv/bin/torchrun --nproc-per-node 2 train.py --lr 3e-4",
+                0.1,
+            ),
             proc(31, 30, "/home/u/.venv/bin/python -u train.py --lr 3e-4", 1.0),
             proc(32, 30, "/home/u/.venv/bin/python -u train.py --lr 3e-4", 1.0),
         ];
-        let w = run(
-            &procs,
-            &[(31, gpu(0, 25 << 30, Some(97), true)), (32, gpu(1, 25 << 30, Some(98), true))],
-            &[],
-        );
+        let w = run(&procs, &[(31, gpu(0, 25 << 30, Some(97), true)), (32, gpu(1, 25 << 30, Some(98), true))], &[]);
         assert_eq!(w.len(), 1, "{w:#?}");
         assert_eq!(w[0].kind, Kind::Training);
         assert_eq!(w[0].id, 30);
@@ -589,12 +683,21 @@ mod tests {
             proc(1, 0, "systemd", 0.0),
             proc(40, 1, "/usr/bin/gnome-shell --mode=ubuntu", 3.0),
             proc(41, 1, "/opt/google/chrome/chrome", 0.0),
-            proc(42, 41, "/opt/google/chrome/chrome --type=gpu-process --render-node-override=/dev/dri/renderD129", 0.5),
+            proc(
+                42,
+                41,
+                "/opt/google/chrome/chrome --type=gpu-process --render-node-override=/dev/dri/renderD129",
+                0.5,
+            ),
             proc(43, 1, "walker --gapplication-service", 0.0),
         ];
         let w = run(
             &procs,
-            &[(40, gpu(1, 300 << 20, Some(10), false)), (42, gpu(1, 2 << 30, Some(5), true)), (43, gpu(0, 0, None, true))],
+            &[
+                (40, gpu(1, 300 << 20, Some(10), false)),
+                (42, gpu(1, 2 << 30, Some(5), true)),
+                (43, gpu(0, 0, None, true)),
+            ],
             &[],
         );
         assert!(w.is_empty(), "{w:#?}");
@@ -618,7 +721,10 @@ mod tests {
             "uv export.py"
         );
         assert_eq!(label(&proc(1, 0, "nice -n 10 taskset -c 0-7 python3 prep.py", 0.0)), "python prep.py");
-        assert_eq!(label(&proc(1, 0, "env CUDA_VISIBLE_DEVICES=1 timeout 2h torchrun train.py", 0.0)), "torchrun train.py");
+        assert_eq!(
+            label(&proc(1, 0, "env CUDA_VISIBLE_DEVICES=1 timeout 2h torchrun train.py", 0.0)),
+            "torchrun train.py"
+        );
         assert_eq!(label(&proc(1, 0, "/usr/bin/time", 0.0)), "time");
     }
 
@@ -655,7 +761,10 @@ mod tests {
         let r = redact(&args);
         assert!(!r.contains("sk-999") && !r.contains("abc"), "{r}");
         assert_eq!(program(&proc(1, 0, "x", 0.0)), "x");
-        let chrome = ProcInfo { args: vec!["/opt/google/chrome/chrome --type=renderer --lang=en".to_string()].into(), ..proc(2, 0, "chrome", 0.0) };
+        let chrome = ProcInfo {
+            args: vec!["/opt/google/chrome/chrome --type=renderer --lang=en".to_string()].into(),
+            ..proc(2, 0, "chrome", 0.0)
+        };
         assert_eq!(program(&chrome), "chrome");
     }
 
@@ -715,7 +824,8 @@ mod tests {
 
     #[test]
     fn heavy_cpu_needs_to_last() {
-        let procs = vec![proc(1, 0, "systemd", 0.0), proc(5, 1, "bash", 0.0), proc(60, 5, "/usr/bin/python3 tokenize.py", 6.0)];
+        let procs =
+            vec![proc(1, 0, "systemd", 0.0), proc(5, 1, "bash", 0.0), proc(60, 5, "/usr/bin/python3 tokenize.py", 6.0)];
         // Hot, but not for long enough yet.
         assert!(run(&procs, &[], &[]).is_empty());
     }

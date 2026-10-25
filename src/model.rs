@@ -46,7 +46,10 @@ pub enum ViewerMsg {
     /// How often to sample, in milliseconds, which the agent keeps within
     /// `MIN_INTERVAL_MS..=MAX_INTERVAL_MS`; and whether to send detail
     /// (command lines, top processes) for a host the user is looking at.
-    Subscribe { interval_ms: u32, detail: bool },
+    Subscribe {
+        interval_ms: u32,
+        detail: bool,
+    },
     Bye,
 }
 
@@ -505,7 +508,12 @@ mod tests {
     #[test]
     fn messages_survive_a_roundtrip() {
         let msgs = vec![
-            AgentMsg::Hello(Hello { protocol: 1, version: "0.1.0".into(), target: "x86_64-linux".into(), resident: true }),
+            AgentMsg::Hello(Hello {
+                protocol: 1,
+                version: "0.1.0".into(),
+                target: "x86_64-linux".into(),
+                resident: true,
+            }),
             AgentMsg::Alerts(vec![Alert {
                 id: 1,
                 time_ms: 2,

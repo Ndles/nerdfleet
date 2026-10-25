@@ -39,7 +39,8 @@ fn agent_says_hello_then_describes_and_measures_the_host() {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    write_frame(&mut stdin, &Frame { route: vec![], msg: ViewerMsg::Subscribe { interval_ms: 250, detail: true } }).unwrap();
+    write_frame(&mut stdin, &Frame { route: vec![], msg: ViewerMsg::Subscribe { interval_ms: 250, detail: true } })
+        .unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let mut next = || read_frame::<_, Frame<AgentMsg>>(&mut stdout).unwrap().unwrap().msg;
 

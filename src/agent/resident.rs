@@ -10,7 +10,7 @@
 
 use super::core::{without_detail, Core};
 use crate::history::History;
-use crate::model::{Alert, AgentMsg, Frame, Hello, ViewerMsg};
+use crate::model::{AgentMsg, Alert, Frame, Hello, ViewerMsg};
 use crate::proto::{read_frame, write_frame, Wire, PROTOCOL_VERSION};
 use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -235,7 +235,9 @@ pub fn run() -> anyhow::Result<()> {
                 match c.tx.try_send(bytes) {
                     Ok(()) => {}
                     // Stuck or gone: let it go, and keep sampling for the rest.
-                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => c.alive.store(false, Ordering::SeqCst),
+                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                        c.alive.store(false, Ordering::SeqCst)
+                    }
                 }
             }
         }

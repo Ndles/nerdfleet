@@ -96,7 +96,9 @@ impl Ui<'_> {
             .hosts
             .chunks(cols as usize)
             .enumerate()
-            .map(|(i, row)| (i, row.iter().map(|h| card_lines(self.theme, h, width).len() as u16 + 2).max().unwrap_or(3)))
+            .map(|(i, row)| {
+                (i, row.iter().map(|h| card_lines(self.theme, h, width).len() as u16 + 2).max().unwrap_or(3))
+            })
             .collect();
         // Scroll so the selected card's row is on screen.
         let sel_row = self.selected / cols as usize;
@@ -149,7 +151,7 @@ impl Ui<'_> {
                     format!(" {} · {} threads{} ", inv.os, inv.threads, if host.resident { " · resident" } else { "" }),
                     Style::default().fg(t.dim),
                 ))
-                    .right_aligned(),
+                .right_aligned(),
             );
         }
         let inner = block.inner(full);
@@ -310,17 +312,16 @@ pub fn workload_use(w: &Workload) -> String {
 /// One line on a card: kind, name, what it serves or runs, and its use.
 fn workload_line<'a>(t: &Theme, w: &Workload, iw: usize) -> Line<'a> {
     // One column wider than the other labels: "TRAIN" fills five.
-    let kind = format!("{:<KIND$}", match w.kind {
-        Kind::Inference => "INFR",
-        Kind::Training => "TRAIN",
-        Kind::Cpu => "CPU",
-    });
+    let kind = format!(
+        "{:<KIND$}",
+        match w.kind {
+            Kind::Inference => "INFR",
+            Kind::Training => "TRAIN",
+            Kind::Cpu => "CPU",
+        }
+    );
     let stalled = w.kind == Kind::Training && w.gpu_idle_s >= STALL_S;
-    let right = if stalled {
-        format!("GPUs idle {}", span(w.gpu_idle_s as u64))
-    } else {
-        workload_use(w)
-    };
+    let right = if stalled { format!("GPUs idle {}", span(w.gpu_idle_s as u64)) } else { workload_use(w) };
     let mut detail = w.label.clone();
     if !w.model.is_empty() {
         detail.push_str(" · ");
@@ -406,7 +407,10 @@ fn gpu_bar_line<'a>(t: &Theme, info: &GpuInfo, g: &Gpu, bar_w: usize) -> Line<'a
             return Line::from(vec![indent, Span::styled("asleep, not woken to ask", Style::default().fg(t.dim))])
         }
         Power::Idle => {
-            return Line::from(vec![indent, Span::styled("idle, left alone so it can sleep", Style::default().fg(t.dim))])
+            return Line::from(vec![
+                indent,
+                Span::styled("idle, left alone so it can sleep", Style::default().fg(t.dim)),
+            ])
         }
     }
     if !info.metrics {
@@ -417,11 +421,8 @@ fn gpu_bar_line<'a>(t: &Theme, info: &GpuInfo, g: &Gpu, bar_w: usize) -> Line<'a
     l.extend(bar(t, bar_w, util, t.accent));
     // On unified memory the working set lives in shared memory (GTT), not
     // in the small VRAM carve-out.
-    let (used, total, suffix) = if info.unified {
-        (g.shared_used, info.shared_total, " sh")
-    } else {
-        (g.mem_used, info.mem_total, "")
-    };
+    let (used, total, suffix) =
+        if info.unified { (g.shared_used, info.shared_total, " sh") } else { (g.mem_used, info.mem_total, "") };
     let mem = match (used, total) {
         (Some(u), Some(tot)) => format!("{}/{}{suffix}", gib(u), gib(tot)),
         (Some(u), None) => format!("{}{suffix}", gib(u)),

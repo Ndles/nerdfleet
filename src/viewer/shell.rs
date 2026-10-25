@@ -96,7 +96,8 @@ pub fn draw_bar(buf: &mut Buffer, area: Rect, theme: &Theme, host: &str, shell: 
     let keys = if shell.ended { "Enter reconnect  Ctrl+] dashboard " } else { "Ctrl+] dashboard " };
     let kw = keys.chars().count() as u16;
     if area.width > kw + 20 {
-        Span::styled(keys, Style::default().fg(t.dim)).render(Rect { x: area.x + area.width - kw, width: kw, ..area }, buf);
+        Span::styled(keys, Style::default().fg(t.dim))
+            .render(Rect { x: area.x + area.width - kw, width: kw, ..area }, buf);
     }
 }
 
@@ -130,8 +131,9 @@ fn local_command() -> Vec<String> {
 fn local_nerdmux() -> Option<String> {
     use std::process::{Command, Stdio};
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let mut candidates: Vec<std::path::PathBuf> =
-        std::env::var_os("PATH").map(|p| std::env::split_paths(&p).map(|d| d.join("nerdmux")).collect()).unwrap_or_default();
+    let mut candidates: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).map(|d| d.join("nerdmux")).collect())
+        .unwrap_or_default();
     if let Some(home) = home {
         candidates.push(home.join(".local/bin/nerdmux"));
         candidates.push(home.join(".cargo/bin/nerdmux"));
@@ -195,7 +197,11 @@ mod tests {
         let bin = home.join(".cargo/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("nerdmux");
-        std::fs::write(&fake, "#!/bin/sh\nif [ \"$1\" = --help ]; then echo 'attach --plain'; else echo \"ran $*\"; fi\n").unwrap();
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nif [ \"$1\" = --help ]; then echo 'attach --plain'; else echo \"ran $*\"; fi\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         for shell in ["sh", "dash", "bash"] {
             if std::process::Command::new(shell).arg("-c").arg("true").output().is_err() {

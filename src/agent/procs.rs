@@ -46,13 +46,7 @@ fn parse_stat(text: &str) -> Option<Stat> {
     let f: Vec<&str> = text.get(close + 1..)?.split_whitespace().collect();
     // f[0] is the state; the numbers are `proc_pid_stat(5)` fields 4 on.
     let n = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok());
-    Some(Stat {
-        comm,
-        ppid: n(1)? as u32,
-        ticks: n(11)? + n(12)?,
-        start_ticks: n(19)?,
-        rss_pages: n(21)?,
-    })
+    Some(Stat { comm, ppid: n(1)? as u32, ticks: n(11)? + n(12)?, start_ticks: n(19)?, rss_pages: n(21)? })
 }
 
 fn sysconf(name: libc::c_int, fallback: u64) -> u64 {

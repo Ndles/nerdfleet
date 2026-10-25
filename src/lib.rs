@@ -5,12 +5,12 @@
 
 pub mod agent;
 pub mod config;
+pub mod conn;
 pub mod history;
 pub mod model;
 pub mod paths;
 pub mod proto;
-pub mod text;
-pub mod conn;
 pub mod remote;
 pub mod resident_ctl;
+pub mod text;
 pub mod viewer;

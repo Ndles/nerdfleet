@@ -177,7 +177,9 @@ fn session(index: usize, host: &Host, shared: &Shared, tx: &Sender<Event>) -> an
 fn talk(index: usize, mut cmd: Command, alias: &str, target: &str, shared: &Shared, tx: &Sender<Event>) -> Ended {
     let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
-        Err(e) => return Ended::Done(Err(anyhow::anyhow!("cannot start {}: {e}", cmd.get_program().to_string_lossy()))),
+        Err(e) => {
+            return Ended::Done(Err(anyhow::anyhow!("cannot start {}: {e}", cmd.get_program().to_string_lossy())))
+        }
     };
     shared.children.lock().unwrap()[index] = Some(child.id());
     let stderr = collect_stderr(&mut child);
@@ -189,7 +191,10 @@ fn talk(index: usize, mut cmd: Command, alias: &str, target: &str, shared: &Shar
         match read_frame::<_, Frame<AgentMsg>>(&mut stdout) {
             Ok(Some(Frame { msg: AgentMsg::Hello(h), .. })) if !greeted => {
                 if h.protocol != PROTOCOL_VERSION {
-                    break Err(anyhow::anyhow!("the agent speaks protocol {}, this viewer {PROTOCOL_VERSION}", h.protocol));
+                    break Err(anyhow::anyhow!(
+                        "the agent speaks protocol {}, this viewer {PROTOCOL_VERSION}",
+                        h.protocol
+                    ));
                 }
                 if h.target != target {
                     break Err(anyhow::anyhow!("the agent is built for {}, but the host is {target}", h.target));

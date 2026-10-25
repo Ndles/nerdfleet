@@ -49,9 +49,11 @@ fn a_viewer_attaches_to_the_resident_agent_and_its_state_is_saved() {
     let twice = agent(&["agent", "--resident"], &run, &state).stderr(Stdio::null()).status().unwrap();
     assert!(!twice.success());
 
-    let mut viewer = agent(&["agent", "--stdio"], &run, &state).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut viewer =
+        agent(&["agent", "--stdio"], &run, &state).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut stdin = viewer.stdin.take().unwrap();
-    write_frame(&mut stdin, &Frame { route: vec![], msg: ViewerMsg::Subscribe { interval_ms: 1000, detail: true } }).unwrap();
+    write_frame(&mut stdin, &Frame { route: vec![], msg: ViewerMsg::Subscribe { interval_ms: 1000, detail: true } })
+        .unwrap();
     let mut out = viewer.stdout.take().unwrap();
     let mut next = || read_frame::<_, Frame<AgentMsg>>(&mut out).unwrap().unwrap().msg;
     let AgentMsg::Hello(h) = next() else { panic!("no hello") };
@@ -80,7 +82,8 @@ fn a_viewer_attaches_to_the_resident_agent_and_its_state_is_saved() {
     assert!(!sock.exists());
 
     // Without a resident, --stdio samples by itself.
-    let mut alone = agent(&["agent", "--stdio"], &run, &state).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut alone =
+        agent(&["agent", "--stdio"], &run, &state).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut out = alone.stdout.take().unwrap();
     let AgentMsg::Hello(h) = read_frame::<_, Frame<AgentMsg>>(&mut out).unwrap().unwrap().msg else { panic!() };
     assert!(!h.resident);
@@ -108,7 +111,8 @@ fn an_older_resident_is_left_alone_and_the_viewer_is_told() {
         let hello = Hello { protocol: 2, version: "0.0.9".into(), target: "x86_64-linux".into(), resident: true };
         write_frame(&mut s, &Frame { route: vec![], msg: AgentMsg::Hello(hello) }).unwrap();
     });
-    let mut viewer = agent(&["agent", "--stdio"], &run, &state).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut viewer =
+        agent(&["agent", "--stdio"], &run, &state).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut out = viewer.stdout.take().unwrap();
     let mut next = || read_frame::<_, Frame<AgentMsg>>(&mut out).unwrap().unwrap().msg;
     let AgentMsg::Hello(h) = next() else { panic!("no hello") };

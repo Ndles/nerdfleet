@@ -25,9 +25,15 @@ use std::time::{Duration, Instant};
 enum Mode {
     Overview,
     /// One host up close, with a workload selected.
-    Host { host: usize, workload: usize, window: usize },
+    Host {
+        host: usize,
+        workload: usize,
+        window: usize,
+    },
     /// A terminal on a host, full screen.
-    Shell { host: usize },
+    Shell {
+        host: usize,
+    },
 }
 
 /// Puts the terminal back however the viewer ends, panics included.
@@ -169,7 +175,9 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                                 shells[host] = None;
                                 match open_shell(&config.hosts[host], &control_dir, &mut next_shell, &term, &wake_tx) {
                                     Ok(s) => shells[host] = Some(s),
-                                    Err(e) => hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}"))),
+                                    Err(e) => {
+                                        hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")))
+                                    }
                                 }
                             }
                         } else {
@@ -422,15 +430,40 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
     result?;
     let (Some(inv), Some(s)) = (&view.inventory, &view.sample) else { return Ok(()) };
     println!("{} · {} · kernel {}", inv.hostname, inv.os, inv.kernel);
-    println!("cpu  {} · {} threads · {:.0}% busy · load {:.2} {:.2} {:.2}", inv.cpu_model, inv.threads, s.cpu.busy * 100.0, s.cpu.load[0], s.cpu.load[1], s.cpu.load[2]);
-    println!("mem  {} of {} used · swap {} of {}", ui::gib(s.mem.total.saturating_sub(s.mem.available)), ui::gib(s.mem.total), ui::gib(s.mem.swap_used), ui::gib(s.mem.swap_total));
+    println!(
+        "cpu  {} · {} threads · {:.0}% busy · load {:.2} {:.2} {:.2}",
+        inv.cpu_model,
+        inv.threads,
+        s.cpu.busy * 100.0,
+        s.cpu.load[0],
+        s.cpu.load[1],
+        s.cpu.load[2]
+    );
+    println!(
+        "mem  {} of {} used · swap {} of {}",
+        ui::gib(s.mem.total.saturating_sub(s.mem.available)),
+        ui::gib(s.mem.total),
+        ui::gib(s.mem.swap_used),
+        ui::gib(s.mem.swap_total)
+    );
     for (m, d) in inv.mounts.iter().zip(&s.disks) {
         println!("disk {m}: {} of {}", ui::gib(d.used), ui::gib(d.total));
     }
-    println!("io   net ↓{} ↑{} · disk r {} w {}", ui::rate(s.net.read), ui::rate(s.net.write), ui::rate(s.disk_io.read), ui::rate(s.disk_io.write));
+    println!(
+        "io   net ↓{} ↑{} · disk r {} w {}",
+        ui::rate(s.net.read),
+        ui::rate(s.net.write),
+        ui::rate(s.disk_io.read),
+        ui::rate(s.disk_io.write)
+    );
     for (i, (g, x)) in inv.gpus.iter().zip(&s.gpus).enumerate() {
         println!("gpu{i} {} {} [{}] unified={} metrics={}", g.vendor.label(), g.name, g.bus, g.unified, g.metrics);
-        println!("     total vram {:?} shared {:?} limit {:?}W", g.mem_total.map(ui::gib), g.shared_total.map(ui::gib), g.power_limit_w);
+        println!(
+            "     total vram {:?} shared {:?} limit {:?}W",
+            g.mem_total.map(ui::gib),
+            g.shared_total.map(ui::gib),
+            g.power_limit_w
+        );
         println!("     {x:?}");
     }
     for w in &view.workloads.list {
@@ -454,7 +487,14 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
         println!("     $ {}", w.cmdline);
     }
     for p in &view.workloads.top {
-        println!("top  {:>7} {:<20} {:>5.1} cores {:>7} gpu {}", p.pid, p.name, p.cpu, ui::gib(p.rss), ui::gib(p.gpu_mem));
+        println!(
+            "top  {:>7} {:<20} {:>5.1} cores {:>7} gpu {}",
+            p.pid,
+            p.name,
+            p.cpu,
+            ui::gib(p.rss),
+            ui::gib(p.gpu_mem)
+        );
     }
     Ok(())
 }
@@ -506,7 +546,13 @@ mod tests {
                 power_limit_w: Some(200.0),
                 metrics: true,
             },
-            Gpu { util: Some(97), mem_used: Some(27 << 30), temp_c: Some(76.0), power_w: Some(200.0), ..Default::default() },
+            Gpu {
+                util: Some(97),
+                mem_used: Some(27 << 30),
+                temp_c: Some(76.0),
+                power_w: Some(200.0),
+                ..Default::default()
+            },
         )
     }
 
@@ -552,7 +598,11 @@ mod tests {
             host("gpu-box", vec![nvidia(), nvidia()], State::Live),
             host("apu-box", vec![apu()], State::Live),
             host("laptop", vec![sleeper()], State::Live),
-            host("gone", vec![], State::Down("no such host: is `gone` in ~/.ssh/config?".into(), std::time::Instant::now())),
+            host(
+                "gone",
+                vec![],
+                State::Down("no such host: is `gone` in ~/.ssh/config?".into(), std::time::Instant::now()),
+            ),
         ];
         let screen = render(&hosts, 110, 40);
         if std::env::var_os("NERDFLEET_SHOW").is_some() {

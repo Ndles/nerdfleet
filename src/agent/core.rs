@@ -6,7 +6,7 @@
 use super::alerts::{self, Engine};
 use super::{gpu, linux, procs, workload};
 use crate::history::{self, History};
-use crate::model::{Alert, AgentMsg, Inventory, Sample, Workloads};
+use crate::model::{AgentMsg, Alert, Inventory, Sample, Workloads};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How often workloads are worked out. Slightly under two seconds, so that

@@ -3,7 +3,7 @@
 use crate::config::Host;
 use crate::conn::State;
 use crate::history::{self, History};
-use crate::model::{Alert, AlertKind, AgentMsg, Inventory, Sample, Workloads};
+use crate::model::{AgentMsg, Alert, AlertKind, Inventory, Sample, Workloads};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Agent problems kept per host.

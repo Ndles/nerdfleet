@@ -225,7 +225,8 @@ impl Ssh {
             anyhow::bail!(explain(out.status.code(), &String::from_utf8_lossy(&out.stderr), &self.alias));
         }
         let line = String::from_utf8_lossy(&out.stdout);
-        target_from_uname(&line).ok_or_else(|| anyhow::anyhow!("unsupported system: {}", crate::text::clean(line.trim())))
+        target_from_uname(&line)
+            .ok_or_else(|| anyhow::anyhow!("unsupported system: {}", crate::text::clean(line.trim())))
     }
 
     pub fn upload(&self, agent: &AgentBuild) -> anyhow::Result<()> {
@@ -299,7 +300,10 @@ mod tests {
         assert_eq!(release.for_target("aarch64-linux").unwrap().bytes, b"aarch64-linux");
         assert!(release.for_target("aarch64-linux").unwrap().name.starts_with("agent-"));
         let err = release.for_target("aarch64-macos").err().unwrap().to_string();
-        assert_eq!(err, "the host is aarch64-macos, and this nerdfleet carries agents for x86_64-linux, aarch64-linux only");
+        assert_eq!(
+            err,
+            "the host is aarch64-macos, and this nerdfleet carries agents for x86_64-linux, aarch64-linux only"
+        );
 
         let dev = Agents { builds: vec![build("x86_64-linux")], embedded: false };
         let err = dev.for_target("aarch64-linux").err().unwrap().to_string();
@@ -330,7 +334,16 @@ mod tests {
 
     #[test]
     fn scripts_survive_every_login_shell() {
-        for s in [PREPARE, PROBE, RUN, UPLOAD, crate::resident_ctl::VERIFY, crate::resident_ctl::ENABLE, crate::resident_ctl::DISABLE, crate::resident_ctl::STATUS] {
+        for s in [
+            PREPARE,
+            PROBE,
+            RUN,
+            UPLOAD,
+            crate::resident_ctl::VERIFY,
+            crate::resident_ctl::ENABLE,
+            crate::resident_ctl::DISABLE,
+            crate::resident_ctl::STATUS,
+        ] {
             assert!(!s.contains('\'') && !s.contains('!') && !s.contains('\\') && !s.contains('\n'));
         }
     }
@@ -371,7 +384,8 @@ mod tests {
         // runs: it must still be there when the service next starts.
         let units = home.join(".config/systemd/user");
         std::fs::create_dir_all(&units).unwrap();
-        std::fs::write(units.join("nerdfleet-agent.service"), "ExecStart=/bin/sh -c '...' nerdfleet agent-x 00\n").unwrap();
+        std::fs::write(units.join("nerdfleet-agent.service"), "ExecStart=/bin/sh -c '...' nerdfleet agent-x 00\n")
+            .unwrap();
         let newer = b"#!/bin/sh\necho newer\n";
         let newer_hash = hex(&Sha256::digest(newer));
         let dir = home.join(".cache/nerdfleet");

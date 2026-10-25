@@ -287,14 +287,22 @@ impl Gpus {
         // Ask NVIDIA when it is time, or when a GPU just woke and has no
         // answer to reuse.
         self.nvidia_fresh = self.nvidia_at.is_none_or(|t| t.elapsed() >= NVIDIA_EVERY)
-            || self.entries.iter().zip(&power).any(|(e, p)| nvidia(&e.backend) && *p == Power::Awake && e.cached.is_none());
+            || self
+                .entries
+                .iter()
+                .zip(&power)
+                .any(|(e, p)| nvidia(&e.backend) && *p == Power::Awake && e.cached.is_none());
         if self.nvidia_fresh {
             self.nvidia_at = Some(Instant::now());
         }
         let smi = match &self.smi {
             Some(path)
                 if self.nvidia_fresh
-                    && self.entries.iter().zip(&power).any(|(e, p)| matches!(e.backend, Backend::Smi) && *p == Power::Awake) =>
+                    && self
+                        .entries
+                        .iter()
+                        .zip(&power)
+                        .any(|(e, p)| matches!(e.backend, Backend::Smi) && *p == Power::Awake) =>
             {
                 smi::query(path)
             }
@@ -397,7 +405,8 @@ impl Gpus {
     /// Starts NVML when an NVIDIA GPU it measures is to be measured.
     fn start_nvml(&mut self, power: &[Power], problems: &mut Vec<String>) {
         let Some(lib) = &mut self.nvml else { return };
-        let want = self.entries.iter().zip(power).any(|(e, p)| matches!(e.backend, Backend::Nvml) && *p == Power::Awake);
+        let want =
+            self.entries.iter().zip(power).any(|(e, p)| matches!(e.backend, Backend::Nvml) && *p == Power::Awake);
         if want && !lib.started() {
             match lib.start() {
                 Ok(devs) => self.handles = devs,
@@ -428,5 +437,4 @@ mod tests {
         assert!(!parse_rtd3("Runtime D3 status:          Disabled by default\n"));
         assert!(!parse_rtd3(""));
     }
-
 }

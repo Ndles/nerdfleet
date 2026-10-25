@@ -43,10 +43,7 @@ pub struct History {
 impl Default for History {
     fn default() -> History {
         History {
-            rings: RINGS
-                .iter()
-                .map(|&(step_ms, cap)| Ring { step_ms, cap, end: 0, series: Vec::new() })
-                .collect(),
+            rings: RINGS.iter().map(|&(step_ms, cap)| Ring { step_ms, cap, end: 0, series: Vec::new() }).collect(),
         }
     }
 }
@@ -224,7 +221,10 @@ mod tests {
         // A minute and a half with the agent off, then one more sample.
         h.push(115_000, &[20, 50]);
         let ten = &h.rings[1];
-        assert_eq!(ten.series[0].iter().copied().collect::<Vec<_>>(), [90, 10, 10, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, 20]);
+        assert_eq!(
+            ten.series[0].iter().copied().collect::<Vec<_>>(),
+            [90, 10, 10, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, 20]
+        );
         assert_eq!(ten.end, 11);
         assert_eq!(h.rings[0].series[0].len(), 26, "the finest ring takes every sample");
         assert_eq!(h.rings[0].end, 26);

@@ -94,7 +94,13 @@ impl Engine {
             if pct >= DISK_FULL && !self.disk_fired[i] {
                 self.disk_fired[i] = true;
                 let free = d.total.saturating_sub(d.used) as f64 / (1u64 << 30) as f64;
-                self.raise(t, AlertKind::DiskFull, mount, format!("{mount} is {pct:.0}% full, {free:.1} GiB left"), &mut out);
+                self.raise(
+                    t,
+                    AlertKind::DiskFull,
+                    mount,
+                    format!("{mount} is {pct:.0}% full, {free:.1} GiB left"),
+                    &mut out,
+                );
             } else if pct < DISK_REARM {
                 self.disk_fired[i] = false;
             }
@@ -138,7 +144,10 @@ impl Engine {
                     let temp = g.temp_c.map_or(String::new(), |c| format!(" at {c:.0}°C"));
                     let name = inv.gpus.get(i).map_or("GPU", |g| g.vendor.label());
                     let subject = format!("gpu{i}");
-                    let msg = format!("{name} gpu{i} has been slowing itself down for heat or a hardware limit for {}{temp}", span(t - start));
+                    let msg = format!(
+                        "{name} gpu{i} has been slowing itself down for heat or a hardware limit for {}{temp}",
+                        span(t - start)
+                    );
                     self.raise(t, AlertKind::GpuThrottled, &subject, msg, &mut out);
                 }
             } else {
@@ -288,9 +297,17 @@ mod tests {
     #[test]
     fn an_end_is_news_only_for_lasting_gpu_work() {
         let mut e = Engine::default();
-        e.workloads(0, &[work(1, Kind::Training, 0), work(2, Kind::Cpu, 0), work(3, Kind::Inference, 0)], NO_PORTS, EXITED, Some(1));
+        e.workloads(
+            0,
+            &[work(1, Kind::Training, 0), work(2, Kind::Cpu, 0), work(3, Kind::Inference, 0)],
+            NO_PORTS,
+            EXITED,
+            Some(1),
+        );
         // A minute later: the server went, too young to matter.
-        assert!(e.workloads(60_000, &[work(1, Kind::Training, 0), work(2, Kind::Cpu, 0)], NO_PORTS, EXITED, Some(1)).is_empty());
+        assert!(e
+            .workloads(60_000, &[work(1, Kind::Training, 0), work(2, Kind::Cpu, 0)], NO_PORTS, EXITED, Some(1))
+            .is_empty());
         // Three hours later the training run ends, with an OOM kill.
         let a = e.workloads(3 * 3600 * 1000, &[], NO_PORTS, EXITED, Some(2));
         assert_eq!(a.len(), 1, "{a:?}");
@@ -355,7 +372,11 @@ mod tests {
             ..Default::default()
         };
         let mut e = Engine::default();
-        let at = |t: u64, on: bool| Sample { time_ms: t, gpus: vec![Gpu { throttled: Some(on), ..Default::default() }], ..Default::default() };
+        let at = |t: u64, on: bool| Sample {
+            time_ms: t,
+            gpus: vec![Gpu { throttled: Some(on), ..Default::default() }],
+            ..Default::default()
+        };
         assert!(e.sample(&inv, &at(0, true)).is_empty());
         assert!(e.sample(&inv, &at(100_000, false)).is_empty(), "broken streak");
         assert!(e.sample(&inv, &at(200_000, true)).is_empty());
@@ -376,7 +397,11 @@ mod tests {
         };
         let inv = Inventory { gpus: vec![info], ..Default::default() };
         let mut e = Engine::default();
-        let at = |t: u64, used: u64| Sample { time_ms: t, gpus: vec![Gpu { mem_used: Some(used), ..Default::default() }], ..Default::default() };
+        let at = |t: u64, used: u64| Sample {
+            time_ms: t,
+            gpus: vec![Gpu { mem_used: Some(used), ..Default::default() }],
+            ..Default::default()
+        };
         assert!(e.sample(&inv, &at(0, 97)).is_empty());
         assert!(e.sample(&inv, &at(60_000, 97)).is_empty(), "not yet");
         assert_eq!(e.sample(&inv, &at(120_000, 98)).len(), 1);

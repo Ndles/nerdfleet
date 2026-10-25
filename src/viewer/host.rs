@@ -3,8 +3,8 @@
 
 use super::app::HostView;
 use super::ui::{bar, fit, gib, kind_color, level, rate, short_name, span, wrap, STALL_S};
-use crate::history::NONE;
 use crate::conn::State;
+use crate::history::NONE;
 use crate::model::{AlertKind, Gpu, GpuInfo, Kind, Power, Sample, Vendor};
 use nerdmux::embed::Theme;
 use ratatui::buffer::Buffer;
@@ -336,7 +336,8 @@ impl HostUi<'_> {
         const FIXED: usize = 11 + 6 + 7 + 8 + 9 + 6 + 6;
         let models = work.iter().any(|wl| !wl.model.is_empty() || wl.kind == Kind::Inference);
         let flex = width.saturating_sub(FIXED).max(16);
-        let (name_w, model_w) = if models { ((flex / 2).min(40), (flex - flex / 2).min(40)) } else { (flex.min(48), 0) };
+        let (name_w, model_w) =
+            if models { ((flex / 2).min(40), (flex - flex / 2).min(40)) } else { (flex.min(48), 0) };
         lines.push(Line::from(Span::styled(
             format!(
                 "{:<11}{:<name_w$}{:<model_w$}{:>6}{:>7}{:>8}{:>9}{:>6}{:>6}",
@@ -370,7 +371,8 @@ impl HostUi<'_> {
             );
             let kind = format!("{:<11}", wl.kind.label());
             let selected = i == self.selected;
-            let style = if selected { Style::default().bg(t.border).add_modifier(Modifier::BOLD) } else { Style::default() };
+            let style =
+                if selected { Style::default().bg(t.border).add_modifier(Modifier::BOLD) } else { Style::default() };
             let pad = width.saturating_sub(11 + row.chars().count());
             lines.push(Line::from(vec![
                 Span::styled(kind, style.fg(kind_color(t, wl.kind))),
@@ -435,7 +437,7 @@ impl HostUi<'_> {
             let pct = d.used as f32 * 100.0 / d.total.max(1) as f32;
             let mut spans = vec![Span::raw(format!("{:<mount_w$}", fit(m, mount_w - 2)))];
             spans.extend(bar(t, bar_w, pct, level(t, pct)));
-            spans.push(Span::styled(format!(" {pct:>3.0}%", ), Style::default().fg(level(t, pct))));
+            spans.push(Span::styled(format!(" {pct:>3.0}%",), Style::default().fg(level(t, pct))));
             spans.push(Span::styled(format!("  {} of {}", size(d.used), size(d.total)), dim));
             lines.push(Line::from(spans));
         }
@@ -466,7 +468,8 @@ impl HostUi<'_> {
             return lines;
         }
         let new = h.alerts.iter().filter(|a| a.id > h.read_up_to).count();
-        let extra = if new > 0 { vec![Span::styled(format!("{new} new"), Style::default().fg(t.red))] } else { Vec::new() };
+        let extra =
+            if new > 0 { vec![Span::styled(format!("{new} new"), Style::default().fg(t.red))] } else { Vec::new() };
         lines.push(self.rule(&format!("ALERTS  {}", h.alerts.len()), extra, width));
         for a in h.alerts.iter().rev().take(8) {
             let fresh = a.id > h.read_up_to;
@@ -687,12 +690,24 @@ mod tests {
             mounts: vec!["/".into(), "/archive".into(), "/data".into()],
             gpus: vec![nvidia.clone(), nvidia, apu],
         }));
-        let gpu = |util| Gpu { util: Some(util), mem_used: Some(512 << 20), temp_c: Some(28.0), power_w: Some(11.0), ..Default::default() };
+        let gpu = |util| Gpu {
+            util: Some(util),
+            mem_used: Some(512 << 20),
+            temp_c: Some(28.0),
+            power_w: Some(11.0),
+            ..Default::default()
+        };
         for i in 0..900u64 {
             v.apply(AgentMsg::Sample(Sample {
                 time_ms: 1_000_000_000 + i * 1000,
                 cpu: Cpu { busy: ((i % 300) as f32 / 300.0).min(0.9), cores: vec![0; 32], load: [11.91, 8.37, 5.43] },
-                mem: Mem { total: 90 << 30, available: 68 << 30, cached: 47 << 30, swap_total: 8 << 30, swap_used: 3 << 30 },
+                mem: Mem {
+                    total: 90 << 30,
+                    available: 68 << 30,
+                    cached: 47 << 30,
+                    swap_total: 8 << 30,
+                    swap_used: 3 << 30,
+                },
                 disks: vec![
                     Disk { total: 1832 << 30, used: 1026 << 30 },
                     Disk { total: 3726 << 30, used: 520 << 30 },

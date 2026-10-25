@@ -17,10 +17,8 @@ fn read_u64(path: &Path) -> Option<u64> {
 
 impl Amd {
     pub fn new(dev: PathBuf) -> Amd {
-        let hwmon = std::fs::read_dir(dev.join("hwmon"))
-            .ok()
-            .and_then(|mut d| d.find_map(|e| e.ok()))
-            .map(|e| e.path());
+        let hwmon =
+            std::fs::read_dir(dev.join("hwmon")).ok().and_then(|mut d| d.find_map(|e| e.ok())).map(|e| e.path());
         Amd { dev, hwmon }
     }
 
