@@ -12,7 +12,16 @@ resident agents with alerts, and full-screen terminals.
 
 ## Build
 
-Needs Rust 1.85 or newer, and a nerdmux checkout next to this one.
+Needs Rust 1.85 or newer. nerdfleet uses [nerdmux](https://github.com/Ndles/nerdmux)'s terminal as a library, at the
+commit `Cargo.toml` pins; Cargo fetches it.
+
+To work on both, keep the checkouts side by side and build nerdfleet against yours with a `.cargo/config.toml` in
+the directory above them (`scripts/release.sh` needs the checkout there too, at the pinned commit):
+
+```toml
+[patch."https://github.com/Ndles/nerdmux"]
+nerdmux = { path = "nerdmux" }
+```
 
 ```sh
 cargo install --path .      # puts `nerdfleet` in ~/.cargo/bin
