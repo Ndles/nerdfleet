@@ -53,7 +53,7 @@ lint:
 
 # Put `nerdfleet` in ~/.cargo/bin
 install:
-    cargo install --path .
+    cargo install --path . --locked
 
 # A build for glibc 2.28 and newer, in dist/ (needs Docker)
 release:

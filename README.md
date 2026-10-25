@@ -24,7 +24,7 @@ nerdmux = { path = "nerdmux" }
 ```
 
 ```sh
-cargo install --path .      # puts `nerdfleet` in ~/.cargo/bin
+cargo install --path . --locked   # puts `nerdfleet` in ~/.cargo/bin
 scripts/release.sh          # or: a build for glibc 2.28 and newer, in dist/ (needs Docker)
 ```
 
