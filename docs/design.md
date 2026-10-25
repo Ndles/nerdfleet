@@ -751,8 +751,9 @@ be able to take over the laptop that watches it.
 - **Today (2026-10-25):** release viewers for x86_64 and aarch64 Linux, each carrying agents for both. aarch64 is
   cross-built with `cargo-zigbuild` against glibc 2.28 (no dependency compiles C, so zig is only the linker). The
   aarch64 agent has passed the agent protocol test under qemu user emulation with a Rocky 8 aarch64 userland, not on
-  aarch64 hardware yet. The x86_64 release viewer deployed its embedded agent to host-b. macOS waits for phase 6 and a
-  Mac: there is no macOS agent, and the macOS viewer needs a Mac (or a CI runner) to build.
+  aarch64 hardware yet. The x86_64 release viewer deployed its embedded agent to host-b. The macOS viewer (Apple Silicon) is built
+  on a GitHub macOS runner, carrying both Linux agents, and passes clippy and the tests there; the macOS agent waits
+  for phase 6 and a Mac.
 - A development build on a rolling distribution (Arch) may need a newer glibc than an older host has; the Arch dev
   build needed 2.39. Use the release build as the viewer when the fleet includes older hosts, since the viewer
   deploys itself.
@@ -812,7 +813,7 @@ Candidates to vet, none decided:
    - **Status (2026-10-24):** working on host-a and host-b (Ubuntu) and on an Arch laptop, including fresh deploys,
      refusal of an open agent directory, clean shutdown, laptop dGPUs left to sleep, and the glibc 2.28 release
      build. Since 2026-10-25 a GitHub workflow tests and builds every release (see `.github/workflows/release.yml`).
-     Not done yet: building the viewer for macOS (nothing has been compiled for macOS yet).
+     The Mac viewer is built there too (Apple Silicon, carrying the Linux agents); not tried on a Mac yet.
 2. **Workload and host view.**
    - Inference, training and high-CPU detectors, with per-process GPU usage (NVML, DRM fdinfo) and the stall check.
    - Graphs from history and the GPU panel.

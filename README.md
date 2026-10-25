@@ -36,8 +36,9 @@ The viewer puts its agent on each host it watches. A release build (`scripts/rel
 on glibc 2.28 and newer, so it reaches RHEL 8-era clusters and ARM nodes. A build from `cargo install` copies itself,
 so it reaches only hosts like the machine it was built on.
 
-Releases are built on GitHub: pushing a tag `vX.Y.Z` that matches `Cargo.toml` runs the same build and publishes both
-viewers; "Run workflow" builds them without publishing.
+Releases are built on GitHub: pushing a tag `vX.Y.Z` that matches `Cargo.toml` runs the same build and publishes the
+two Linux viewers and one for Apple Silicon Macs, which watches Linux hosts (a Mac as a host comes later); "Run
+workflow" builds them without publishing.
 
 ## Use
 
