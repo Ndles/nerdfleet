@@ -305,6 +305,8 @@ pub struct Proc {
     pub cpu: f32,
     pub rss: u64,
     pub gpu_mem: u64,
+    /// The workload it is part of, by `Workload::id`; 0 for none.
+    pub job: u32,
 }
 
 // ===== wire =================================================================
@@ -429,7 +431,7 @@ impl Wire for AlertKind {
 wire_struct!(Workloads { list, top });
 wire_struct!(Workload { id, kind, label, model, ports, procs, started_s, cpu, rss, gpus, gpu_idle_s, cmdline });
 wire_struct!(WorkloadGpu { gpu, mem, busy });
-wire_struct!(Proc { pid, name, cpu, rss, gpu_mem });
+wire_struct!(Proc { pid, name, cpu, rss, gpu_mem, job });
 
 impl Wire for Kind {
     fn put(&self, out: &mut Vec<u8>) {
@@ -559,7 +561,7 @@ mod tests {
                     gpu_idle_s: 0,
                     cmdline: String::new(),
                 }],
-                top: vec![Proc { pid: 1, name: "x".into(), cpu: 1.0, rss: 2, gpu_mem: 0 }],
+                top: vec![Proc { pid: 1, name: "x".into(), cpu: 1.0, rss: 2, gpu_mem: 0, job: 7 }],
             }),
         ];
         for msg in msgs {

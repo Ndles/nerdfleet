@@ -487,8 +487,9 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
         println!("     $ {}", w.cmdline);
     }
     for p in &view.workloads.top {
+        let job = view.workloads.list.iter().find(|w| p.job != 0 && w.id == p.job).map_or("-", |w| w.label.as_str());
         println!(
-            "top  {:>7} {:<20} {:>5.1} cores {:>7} gpu {}",
+            "top  {:>7} {:<20} {:>5.1} cores {:>7} gpu {}  in {job}",
             p.pid,
             p.name,
             p.cpu,

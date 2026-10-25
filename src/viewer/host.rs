@@ -493,29 +493,50 @@ impl HostUi<'_> {
         lines
     }
 
-    /// The busiest processes.
+    /// The busiest processes, each with the workload it is part of; those
+    /// of the selected workload stand out in its color.
     fn top(&self, width: usize) -> Vec<Line<'static>> {
         let t = self.theme;
+        let dim = Style::default().fg(t.dim);
         let top = &self.host.workloads.top;
         if top.is_empty() {
             return Vec::new();
         }
-        let name_w = width.saturating_sub(8 + 2 + 7 + 8 + 9).clamp(12, 40);
+        let work = &self.host.workloads.list;
+        let selected = work.get(self.selected).map(|w| w.id);
+        let flex = width.saturating_sub(8 + 2 + 7 + 8 + 9);
+        let name_w = (flex * 2 / 5).clamp(10, 24);
+        let job_w = flex.saturating_sub(name_w).clamp(8, 32);
         let mut lines = vec![self.rule("TOP PROCESSES", Vec::new(), width)];
         lines.push(Line::from(Span::styled(
-            format!("{:>8}  {:<name_w$}{:>7}{:>8}{:>9}", "PID", "NAME", "CPU", "RSS", "GPU MEM"),
-            Style::default().fg(t.dim),
+            format!("{:>8}  {:<name_w$}{:<job_w$}{:>7}{:>8}{:>9}", "PID", "NAME", "WORKLOAD", "CPU", "RSS", "GPU MEM"),
+            dim,
         )));
         for p in top {
+            let job = work.iter().find(|w| p.job != 0 && w.id == p.job);
+            let mine = job.is_some_and(|w| Some(w.id) == selected);
+            let (label, job_style) = match job {
+                Some(w) if mine => {
+                    (w.label.as_str(), Style::default().fg(kind_color(t, w.kind)).add_modifier(Modifier::BOLD))
+                }
+                Some(w) => (w.label.as_str(), Style::default().fg(kind_color(t, w.kind))),
+                None => ("-", dim),
+            };
+            let text =
+                if mine { Style::default().fg(t.fg).add_modifier(Modifier::BOLD) } else { Style::default().fg(t.fg) };
             lines.push(Line::from(vec![
-                Span::styled(format!("{:>8}  ", p.pid), Style::default().fg(t.dim)),
-                Span::raw(format!(
-                    "{:<name_w$}{:>7.1}{:>8}{:>9}",
-                    fit(&p.name, name_w.saturating_sub(1)),
-                    p.cpu,
-                    gib(p.rss),
-                    if p.gpu_mem > 0 { gib(p.gpu_mem) } else { "-".into() }
-                )),
+                Span::styled(format!("{:>8}  ", p.pid), dim),
+                Span::styled(format!("{:<name_w$}", fit(&p.name, name_w.saturating_sub(1))), text),
+                Span::styled(format!("{:<job_w$}", fit(label, job_w.saturating_sub(1))), job_style),
+                Span::styled(
+                    format!(
+                        "{:>7.1}{:>8}{:>9}",
+                        p.cpu,
+                        gib(p.rss),
+                        if p.gpu_mem > 0 { gib(p.gpu_mem) } else { "-".into() }
+                    ),
+                    text,
+                ),
             ]));
         }
         lines
@@ -733,7 +754,16 @@ mod tests {
                 gpu_idle_s: 0,
                 cmdline: "/usr/bin/time -v uv run --no-sync python scripts/export.py --store /data/run/store --holdout v1 --eval-dir /data/run/eval --decontam-rule coverage:0.5 --unit-limit 100000 --near-dedup nl,math --layout repo --jobs 12 --solo-share 0.25 --out /data/run/shards".into(),
             }],
-            top: (0..8).map(|i| Proc { pid: 956324 + i, name: "python3".into(), cpu: 1.0, rss: 1 << 30, gpu_mem: 0 }).collect(),
+            top: (0..8)
+                .map(|i| Proc {
+                    pid: 956324 + i,
+                    name: if i < 7 { "python3" } else { "rg" }.into(),
+                    cpu: 1.0,
+                    rss: 1 << 30,
+                    gpu_mem: 0,
+                    job: if i < 7 { 947791 } else { 0 },
+                })
+                .collect(),
         }));
         v.apply(AgentMsg::Alerts(
             (0..6)
@@ -760,6 +790,14 @@ mod tests {
             assert!(!all.contains("NVIDIA NVIDIA"), "the vendor is said once");
             for want in ["CPU", "MEM", "GPU2", "WORKLOADS", "DISKS", "ALERTS"] {
                 assert!(all.contains(want), "{w}x{h} shows {want}");
+            }
+            if w >= super::TWO_COLUMNS {
+                // The right column only: the row also holds the left one.
+                let row = text.iter().find_map(|l| l.split_once("956324  python3").map(|(_, rest)| rest));
+                assert!(
+                    row.is_some_and(|r| r.trim_start().starts_with("uv export.py")),
+                    "top processes name their workload"
+                );
             }
         }
     }

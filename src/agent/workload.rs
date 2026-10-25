@@ -457,6 +457,10 @@ impl Tracker {
             }
         }
 
+        // Each process's job, by the job's top process, for the top list.
+        let job_of: HashMap<usize, u32> =
+            jobs.iter().flat_map(|(root, job)| job.members.iter().map(|&m| (m, procs[*root].pid))).collect();
+
         let mut list = Vec::new();
         let mut alive = Vec::new();
         for (root, mut job) in jobs {
@@ -559,12 +563,27 @@ impl Tracker {
         });
 
         let top = if input.detail {
-            let mut all: Vec<&ProcInfo> = procs.iter().filter(|p| p.pid != input.me).collect();
+            let mut all: Vec<usize> = (0..procs.len()).filter(|&i| procs[i].pid != input.me).collect();
             let gpu_mem = |p: &ProcInfo| input.gpus.get(&p.pid).map_or(0, |g| g.iter().map(|g| g.mem).sum::<u64>());
-            all.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(gpu_mem(b).cmp(&gpu_mem(a))));
-            all.iter()
+            all.sort_by(|&a, &b| {
+                let (a, b) = (&procs[a], &procs[b]);
+                b.cpu.total_cmp(&a.cpu).then(gpu_mem(b).cmp(&gpu_mem(a)))
+            });
+            // Only jobs that are workloads count: the rest have no name here.
+            let job = |i: usize| job_of.get(&i).copied().filter(|id| list.iter().any(|w: &Workload| w.id == *id));
+            all.into_iter()
                 .take(TOP)
-                .map(|p| Proc { pid: p.pid, name: program(p), cpu: p.cpu, rss: p.rss, gpu_mem: gpu_mem(p) })
+                .map(|i| {
+                    let p = &procs[i];
+                    Proc {
+                        pid: p.pid,
+                        name: program(p),
+                        cpu: p.cpu,
+                        rss: p.rss,
+                        gpu_mem: gpu_mem(p),
+                        job: job(i).unwrap_or(0),
+                    }
+                })
                 .collect()
         } else {
             Vec::new()
@@ -596,6 +615,35 @@ mod tests {
         let ports_of = move |pid: u32| ports.iter().filter(|(p, _)| *p == pid).map(|(_, port)| *port).collect();
         let input = Input { procs, gpus: &map, gpu_util: &[Some(90), Some(0)], ports: &ports_of, detail: true, me: 0 };
         Tracker::default().update(&input).0
+    }
+
+    #[test]
+    fn top_processes_name_their_workload() {
+        // A training run's ranks are busy; so is a stray process that is
+        // nobody's workload.
+        let procs = vec![
+            proc(1, 0, "/usr/lib/systemd/systemd", 0.0),
+            proc(5, 1, "bash", 0.0),
+            proc(50, 5, "torchrun train.py", 0.1),
+            proc(51, 50, "/usr/bin/python3 train.py --rank 0", 1.0),
+            proc(52, 50, "/usr/bin/python3 train.py --rank 1", 1.0),
+            proc(70, 1, "rg pattern", 0.6),
+        ];
+        let gpus = [(51, gpu(0, 20 << 30, Some(95), true)), (52, gpu(1, 20 << 30, Some(95), true))];
+        let mut map: HashMap<u32, Vec<ProcGpu>> = HashMap::new();
+        for (pid, g) in gpus {
+            map.entry(pid).or_default().push(g);
+        }
+        let ports = |_: u32| Vec::new();
+        let input =
+            Input { procs: &procs, gpus: &map, gpu_util: &[Some(95), Some(95)], ports: &ports, detail: true, me: 0 };
+        let (list, top) = Tracker::default().update(&input);
+        assert_eq!(list.len(), 1, "{list:#?}");
+        assert_eq!(list[0].id, 50);
+        let job = |pid: u32| top.iter().find(|p| p.pid == pid).map(|p| p.job);
+        assert_eq!(job(51), Some(50));
+        assert_eq!(job(52), Some(50));
+        assert_eq!(job(70), Some(0), "not part of any workload");
     }
 
     #[test]
