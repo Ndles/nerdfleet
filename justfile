@@ -47,9 +47,14 @@ config:
 test:
     cargo test
 
-# Clippy, warnings as errors
+# Formatting, then clippy with warnings as errors
 lint:
+    cargo fmt --check
     cargo clippy --all-targets -- -D warnings
+
+# Format the code
+fmt:
+    cargo fmt
 
 # Put `nerdfleet` in ~/.cargo/bin
 install:
