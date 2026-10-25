@@ -19,6 +19,9 @@ cargo install --path .      # puts `nerdfleet` in ~/.cargo/bin
 scripts/release.sh          # or: a build for glibc 2.28 and newer, in dist/ (needs Docker)
 ```
 
+With [just](https://github.com/casey/just), `just` lists the common tasks, and `just fleet` builds nerdfleet and opens
+it in a window of your nerdmux session (or goes back to that window).
+
 The viewer copies itself to each host as the agent, so if the fleet has hosts older than your machine (RHEL 8-era
 clusters), run the release build.
 
