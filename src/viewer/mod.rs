@@ -91,8 +91,13 @@ const FRAME: Duration = Duration::from_millis(12);
 
 pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let config = Config::load(config_path)?;
-    // The look every Nërd tool shares, from ~/.config/nerd-theme.toml.
-    let theme = nerdmux::embed::load_theme();
+    // The look every Nërd tool shares, from ~/.config/nerd-theme.toml,
+    // followed while we run: a change made in nerdmux's settings or by hand
+    // shows here within a second.
+    let mut theme = nerdmux::embed::load_theme();
+    let theme_mtime = || std::fs::metadata(nerdmux::embed::theme_path()).and_then(|m| m.modified()).ok();
+    let mut theme_changed = theme_mtime();
+    let mut theme_checked = Instant::now();
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
     let shared = Arc::new(Shared::new(Agents::load()?, control_dir.clone(), config.interval_ms, config.hosts.len()));
 
@@ -254,6 +259,15 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         }
         // A program may start a synchronized update and never end it.
         let now = Instant::now();
+        if now.duration_since(theme_checked) >= Duration::from_secs(1) {
+            theme_checked = now;
+            let changed = theme_mtime();
+            if changed != theme_changed {
+                theme_changed = changed;
+                theme = nerdmux::embed::load_theme();
+                dirty = true;
+            }
+        }
         for s in shells.iter_mut().flatten() {
             dirty |= s.pane.tick(now);
         }
