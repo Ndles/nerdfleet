@@ -811,7 +811,8 @@ Candidates to vet, none decided:
      malformed-frame test and an escape-sequence test pass.
    - **Status (2026-10-24):** working on host-a and host-b (Ubuntu) and on an Arch laptop, including fresh deploys,
      refusal of an open agent directory, clean shutdown, laptop dGPUs left to sleep, and the glibc 2.28 release
-     build. Not done yet: CI, and building the viewer for macOS (nothing has been compiled for macOS yet).
+     build. Since 2026-10-25 a GitHub workflow tests and builds every release (see `.github/workflows/release.yml`).
+     Not done yet: building the viewer for macOS (nothing has been compiled for macOS yet).
 2. **Workload and host view.**
    - Inference, training and high-CPU detectors, with per-process GPU usage (NVML, DRM fdinfo) and the stall check.
    - Graphs from history and the GPU panel.
