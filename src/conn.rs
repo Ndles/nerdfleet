@@ -5,7 +5,7 @@
 use crate::config::{Access, Host};
 use crate::model::{AgentMsg, Frame, ViewerMsg};
 use crate::proto::{read_frame, write_frame, PROTOCOL_VERSION};
-use crate::remote::{self, AgentBuild, Ssh};
+use crate::remote::{self, Agents, Ssh};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -30,7 +30,7 @@ pub enum Event {
 
 /// What every host thread shares.
 pub struct Shared {
-    pub agent: AgentBuild,
+    pub agents: Agents,
     pub control_dir: PathBuf,
     pub interval_ms: u32,
     pub stop: AtomicBool,
@@ -44,9 +44,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new(agent: AgentBuild, control_dir: PathBuf, interval_ms: u32, hosts: usize) -> Shared {
+    pub fn new(agents: Agents, control_dir: PathBuf, interval_ms: u32, hosts: usize) -> Shared {
         Shared {
-            agent,
+            agents,
             control_dir,
             interval_ms,
             stop: AtomicBool::new(false),
@@ -149,7 +149,7 @@ fn session(index: usize, host: &Host, shared: &Shared, tx: &Sender<Event>) -> an
         Access::Local => {
             let mut cmd = Command::new(remote::self_exe());
             cmd.args(["agent", "--stdio"]);
-            match talk(index, cmd, "local", shared, tx) {
+            match talk(index, cmd, "local", &crate::agent::target(), shared, tx) {
                 Ended::NeedsAgent => anyhow::bail!("the local agent did not start"),
                 Ended::Done(r) => r,
             }
@@ -157,16 +157,14 @@ fn session(index: usize, host: &Host, shared: &Shared, tx: &Sender<Event>) -> an
         Access::Ssh(alias) => {
             let ssh = Ssh::new(alias, &shared.control_dir)?;
             let target = ssh.probe()?;
-            if target != shared.agent.target {
-                anyhow::bail!("the host is {target}, and this nerdfleet only carries an agent for {}", shared.agent.target);
-            }
-            if let Ended::Done(r) = talk(index, ssh.run(&shared.agent), alias, shared, tx) {
+            let agent = shared.agents.for_target(&target)?;
+            if let Ended::Done(r) = talk(index, ssh.run(agent), alias, &target, shared, tx) {
                 return r;
             }
             let _ = tx.send(Event::State(index, State::Deploying));
-            ssh.upload(&shared.agent)?;
+            ssh.upload(agent)?;
             let _ = tx.send(Event::State(index, State::Connecting));
-            match talk(index, ssh.run(&shared.agent), alias, shared, tx) {
+            match talk(index, ssh.run(agent), alias, &target, shared, tx) {
                 Ended::NeedsAgent => anyhow::bail!("the agent was copied but would not start"),
                 Ended::Done(r) => r,
             }
@@ -174,8 +172,9 @@ fn session(index: usize, host: &Host, shared: &Shared, tx: &Sender<Event>) -> an
     }
 }
 
-/// Runs one agent connection to its end.
-fn talk(index: usize, mut cmd: Command, alias: &str, shared: &Shared, tx: &Sender<Event>) -> Ended {
+/// Runs one agent connection to its end. The agent must say it is built
+/// for `target`, the host's.
+fn talk(index: usize, mut cmd: Command, alias: &str, target: &str, shared: &Shared, tx: &Sender<Event>) -> Ended {
     let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) => return Ended::Done(Err(anyhow::anyhow!("cannot start {}: {e}", cmd.get_program().to_string_lossy()))),
@@ -191,6 +190,9 @@ fn talk(index: usize, mut cmd: Command, alias: &str, shared: &Shared, tx: &Sende
             Ok(Some(Frame { msg: AgentMsg::Hello(h), .. })) if !greeted => {
                 if h.protocol != PROTOCOL_VERSION {
                     break Err(anyhow::anyhow!("the agent speaks protocol {}, this viewer {PROTOCOL_VERSION}", h.protocol));
+                }
+                if h.target != target {
+                    break Err(anyhow::anyhow!("the agent is built for {}, but the host is {target}", h.target));
                 }
                 greeted = true;
                 let mut w = stdin.take().expect("taken once");

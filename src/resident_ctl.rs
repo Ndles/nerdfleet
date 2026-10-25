@@ -8,7 +8,7 @@
 //! admin setting, so nerdfleet only says whether it is on, and what to run.
 
 use crate::config::{Access, Host};
-use crate::remote::{self, AgentBuild, Ssh, PREPARE};
+use crate::remote::{self, AgentBuild, Agents, Ssh, PREPARE};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -173,20 +173,18 @@ fn lingering_hint(host: &str, report: &str) {
 
 pub fn enable(host: &Host, control_dir: &Path) -> anyhow::Result<()> {
     let target = Target::of(host, control_dir)?;
-    let agent = AgentBuild::current()?;
-    if let Target::Ssh(ssh) = &target {
-        let t = ssh.probe()?;
-        if t != agent.target {
-            anyhow::bail!("{} is {t}, and this nerdfleet only carries an agent for {}", host.name, agent.target);
-        }
-    }
+    let agents = Agents::load()?;
+    let agent = match &target {
+        Target::Ssh(ssh) => agents.for_target(&ssh.probe()?)?,
+        Target::Local => agents.for_target(&crate::agent::target())?,
+    };
     let args = [agent.name.as_str(), agent.hash.as_str()];
     if target.run(VERIFY, &args, b"", &host.name).is_err() {
         println!("Copying the agent to {}…", host.name);
         target.run(remote::UPLOAD_SCRIPT, &args, &agent.bytes, &host.name)?;
         target.run(VERIFY, &args, b"", &host.name)?;
     }
-    let report = target.run(ENABLE, &args, unit(&agent).as_bytes(), &host.name)?;
+    let report = target.run(ENABLE, &args, unit(agent).as_bytes(), &host.name)?;
     println!("The resident agent runs on {}: it keeps 24 hours of history and raises alerts on its own.", host.name);
     lingering_hint(&host.name, &report);
     Ok(())

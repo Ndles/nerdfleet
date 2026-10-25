@@ -55,6 +55,6 @@ lint:
 install:
     cargo install --path . --locked
 
-# A build for glibc 2.28 and newer, in dist/ (needs Docker)
+# Release viewers for x86_64 and aarch64 Linux, carrying agents for both, in dist/ (needs Docker, zig, cargo-zigbuild)
 release:
     scripts/release.sh

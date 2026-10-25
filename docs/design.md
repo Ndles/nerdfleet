@@ -741,8 +741,18 @@ be able to take over the laptop that watches it.
 - The viewer carries the agent builds for the targets it supports, with their SHA-256 hashes, and copies the right
   one on first connect (see [Agent deployment](#agent-deployment)). Because the version and target are in the name,
   x86_64 and aarch64 nodes can share one home directory.
-- **Today** the viewer carries one agent: itself, for its own target. A host of another architecture or OS is
-  reported as such instead of connected. Carrying the other targets comes with the release build.
+- Since the agent is the viewer's own program, a release is built in two stages: plain builds for every target first
+  (the agents), then each viewer again with those agents inside. `build.rs` embeds what `NERDFLEET_AGENTS` names,
+  refusing files of another version or whose ELF machine does not match the target in their name.
+- A release viewer deploys its embedded agent even to hosts like the machine it runs on, so every viewer of a version
+  puts byte-identical files on hosts. A development build carries no agents and deploys itself, so hosts of another
+  target are reported, with the targets it does carry.
+- The viewer checks that the agent's `Hello` names the target the host reported.
+- **Today (2026-10-25):** release viewers for x86_64 and aarch64 Linux, each carrying agents for both. aarch64 is
+  cross-built with `cargo-zigbuild` against glibc 2.28 (no dependency compiles C, so zig is only the linker). The
+  aarch64 agent has passed the agent protocol test under qemu user emulation with a Rocky 8 aarch64 userland, not on
+  aarch64 hardware yet. The x86_64 release viewer deployed its embedded agent to host-b. macOS waits for phase 6 and a
+  Mac: there is no macOS agent, and the macOS viewer needs a Mac (or a CI runner) to build.
 - A development build on a rolling distribution (Arch) may need a newer glibc than an older host has; the Arch dev
   build needed 2.39. Use the release build as the viewer when the fleet includes older hosts, since the viewer
   deploys itself.

@@ -25,14 +25,16 @@ nerdmux = { path = "nerdmux" }
 
 ```sh
 cargo install --path . --locked   # puts `nerdfleet` in ~/.cargo/bin
-scripts/release.sh          # or: a build for glibc 2.28 and newer, in dist/ (needs Docker)
+scripts/release.sh                # or: release builds for x86_64 and aarch64 Linux, in dist/
 ```
 
 With [just](https://github.com/casey/just), `just` lists the common tasks, and `just fleet` builds nerdfleet and opens
 it in a window of your nerdmux session (or goes back to that window).
 
-The viewer copies itself to each host as the agent, so if the fleet has hosts older than your machine (RHEL 8-era
-clusters), run the release build.
+The viewer puts its agent on each host it watches. A release build (`scripts/release.sh`, which needs Docker, zig and
+[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)) carries agents for x86_64 and aarch64 Linux that run
+on glibc 2.28 and newer, so it reaches RHEL 8-era clusters and ARM nodes. A build from `cargo install` copies itself,
+so it reaches only hosts like the machine it was built on.
 
 ## Use
 

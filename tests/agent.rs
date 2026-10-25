@@ -4,13 +4,34 @@ use nerdfleet::model::{AgentMsg, Frame, ViewerMsg};
 use nerdfleet::proto::{read_frame, write_frame, PROTOCOL_VERSION};
 use std::process::{Command, Stdio};
 
+/// The agent under test: this build, or the command in
+/// `NERDFLEET_TEST_AGENT` (words split on spaces), such as an agent built
+/// for another target run through an emulator:
+///
+/// ```sh
+/// NERDFLEET_TEST_AGENT="qemu-aarch64-static -L <aarch64 root> target/aarch64-unknown-linux-gnu/release/nerdfleet" \
+/// NERDFLEET_TEST_TARGET=aarch64-linux cargo test --test agent
+/// ```
+fn agent_command() -> (Command, String) {
+    match std::env::var("NERDFLEET_TEST_AGENT") {
+        Ok(words) if !words.trim().is_empty() => {
+            let mut words = words.split_whitespace();
+            let mut cmd = Command::new(words.next().unwrap());
+            cmd.args(words);
+            (cmd, std::env::var("NERDFLEET_TEST_TARGET").expect("NERDFLEET_TEST_TARGET with NERDFLEET_TEST_AGENT"))
+        }
+        _ => (Command::new(env!("CARGO_BIN_EXE_nerdfleet")), nerdfleet::agent::target()),
+    }
+}
+
 #[test]
 fn agent_says_hello_then_describes_and_measures_the_host() {
     // A runtime directory of its own: a resident agent running on this
     // machine must not answer instead.
     let run = std::env::temp_dir().join(format!("nerdfleet-agent-test-{}", std::process::id()));
     std::fs::create_dir_all(&run).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nerdfleet"))
+    let (mut cmd, target) = agent_command();
+    let mut child = cmd
         .args(["agent", "--stdio"])
         .env("XDG_RUNTIME_DIR", &run)
         .stdin(Stdio::piped())
@@ -24,6 +45,7 @@ fn agent_says_hello_then_describes_and_measures_the_host() {
 
     let AgentMsg::Hello(hello) = next() else { panic!("no hello first") };
     assert_eq!(hello.protocol, PROTOCOL_VERSION);
+    assert_eq!(hello.target, target);
     let mut inventory = None;
     let mut samples = Vec::new();
     while samples.len() < 2 {

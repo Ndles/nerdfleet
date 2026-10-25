@@ -50,7 +50,7 @@ pub const EXIT_MISMATCH: i32 = 98;
 pub const EXIT_BAD_DIR: i32 = 99;
 pub const EXIT_SSH: i32 = 255;
 
-/// This program, which is also the agent we deploy.
+/// An agent the viewer can put on a host.
 pub struct AgentBuild {
     pub bytes: Vec<u8>,
     pub hash: String,
@@ -60,12 +60,50 @@ pub struct AgentBuild {
 }
 
 impl AgentBuild {
-    pub fn current() -> anyhow::Result<AgentBuild> {
-        let bytes = std::fs::read(self_exe())?;
+    fn new(bytes: Vec<u8>, target: &str) -> AgentBuild {
         let hash = hex(&Sha256::digest(&bytes));
-        let target = crate::agent::target();
         let name = format!("agent-{}-{target}-{}", env!("CARGO_PKG_VERSION"), &hash[..12]);
-        Ok(AgentBuild { bytes, hash, name, target })
+        AgentBuild { bytes, hash, name, target: target.to_string() }
+    }
+
+    /// This program, which is an agent for hosts like this machine.
+    pub fn current() -> anyhow::Result<AgentBuild> {
+        Ok(AgentBuild::new(std::fs::read(self_exe())?, &crate::agent::target()))
+    }
+}
+
+mod embedded {
+    // Written by build.rs: the agents built into this viewer.
+    include!(concat!(env!("OUT_DIR"), "/agents.rs"));
+}
+
+/// The agents this viewer deploys, one per target. A release build
+/// carries one for every target it supports (see build.rs), and deploys
+/// those even to hosts like this machine, so every viewer of a version
+/// puts the same file on a host. A development build carries none and
+/// deploys itself.
+pub struct Agents {
+    builds: Vec<AgentBuild>,
+    embedded: bool,
+}
+
+impl Agents {
+    pub fn load() -> anyhow::Result<Agents> {
+        let builds: Vec<AgentBuild> = embedded::AGENTS.iter().map(|(t, b)| AgentBuild::new(b.to_vec(), t)).collect();
+        if builds.is_empty() {
+            return Ok(Agents { builds: vec![AgentBuild::current()?], embedded: false });
+        }
+        Ok(Agents { builds, embedded: true })
+    }
+
+    /// The agent for hosts of `target`, such as `aarch64-linux`.
+    pub fn for_target(&self, target: &str) -> anyhow::Result<&AgentBuild> {
+        if let Some(b) = self.builds.iter().find(|b| b.target == target) {
+            return Ok(b);
+        }
+        let carried: Vec<&str> = self.builds.iter().map(|b| b.target.as_str()).collect();
+        let more = if self.embedded { "" } else { "; a release build carries agents for more" };
+        anyhow::bail!("the host is {target}, and this nerdfleet carries agents for {} only{more}", carried.join(", "))
     }
 }
 
@@ -253,6 +291,20 @@ pub fn explain(code: Option<i32>, stderr: &str, alias: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_host_gets_the_agent_for_its_target() {
+        let build = |t: &str| AgentBuild::new(t.as_bytes().to_vec(), t);
+        let release = Agents { builds: vec![build("x86_64-linux"), build("aarch64-linux")], embedded: true };
+        assert_eq!(release.for_target("aarch64-linux").unwrap().bytes, b"aarch64-linux");
+        assert!(release.for_target("aarch64-linux").unwrap().name.starts_with("agent-"));
+        let err = release.for_target("aarch64-macos").err().unwrap().to_string();
+        assert_eq!(err, "the host is aarch64-macos, and this nerdfleet carries agents for x86_64-linux, aarch64-linux only");
+
+        let dev = Agents { builds: vec![build("x86_64-linux")], embedded: false };
+        let err = dev.for_target("aarch64-linux").err().unwrap().to_string();
+        assert!(err.ends_with("x86_64-linux only; a release build carries agents for more"), "{err}");
+    }
 
     #[test]
     fn targets_from_uname() {

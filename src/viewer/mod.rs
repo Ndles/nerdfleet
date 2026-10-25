@@ -7,7 +7,7 @@ mod ui;
 
 use crate::config::Config;
 use crate::conn::{self, Event, Shared};
-use crate::remote::AgentBuild;
+use crate::remote::Agents;
 use app::HostView;
 use crossterm::event::{self as term, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
@@ -88,7 +88,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
     // The look every Nërd tool shares, from ~/.config/nerd-theme.toml.
     let theme = nerdmux::embed::load_theme();
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
-    let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir.clone(), config.interval_ms, config.hosts.len()));
+    let shared = Arc::new(Shared::new(Agents::load()?, control_dir.clone(), config.interval_ms, config.hosts.len()));
 
     let (tx, rx) = mpsc::channel();
     for (i, host) in config.hosts.iter().enumerate() {
@@ -376,7 +376,7 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
     };
     let host = config.hosts[index].clone();
     let control_dir = crate::paths::private_dir(&crate::paths::runtime_dir().join("ssh"))?;
-    let shared = Arc::new(Shared::new(AgentBuild::current()?, control_dir, 1000, config.hosts.len()));
+    let shared = Arc::new(Shared::new(Agents::load()?, control_dir, 1000, config.hosts.len()));
     shared.set_detail(index, true);
     let (tx, rx) = mpsc::channel();
     conn::spawn(index, host.clone(), shared.clone(), tx);
