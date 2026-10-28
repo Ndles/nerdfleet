@@ -219,6 +219,15 @@ Numbers that are not finite are refused. A malformed frame ends the connection; 
 has its own connection thread, so a host that stops halfway through a frame stalls only its own card, and SSH
 keepalives end a connection that has gone silent. See [Security](#security) for why.
 
+**Reconnecting (2026-10-28).** A host that goes away is tried 8 times in a row, with pauses doubling from 2 seconds
+to a minute, about three minutes plus each try's SSH connect timeout. Its card says which try comes next and when
+(`try 4 of 8 in 6s`). Then it stops: a host that is off for the night costs nothing until the user presses `r`, which
+tries again at once with a fresh count. A connection that held for a minute starts the count over. Failures that
+trying again would only repeat are not retried at all, and the card says so: a host key that is unknown or changed,
+a refused key, an agent directory that is not private, an agent that does not match or will not start, and a host
+this build has no agent for. A resident agent keeps history while nobody is connected, so the next connection still
+fills the graphs.
+
 ## Metrics
 
 | Group   | Values                                                                 | Linux source                            | macOS source                         |
@@ -544,33 +553,39 @@ PBS and LSF use the same adapter interface later.
 A terminal in nerdfleet is a pane, nerdmux's terminal engine (alacritty_terminal and portable-pty), running a local
 pty with one of:
 
-- **Host:** `ssh -t <alias> nerdmux attach --plain -t fleet`.
+- **Host:** `ssh -t <alias> nerdmux`: the host's nerdmux, attached to the user's last session there.
 - **Cluster job:** `ssh -t <login alias> srun --jobid=<id> --overlap --pty $SHELL`. The shell runs inside the job's
   allocation and ends with the job; the pane says so instead of offering to reconnect.
 
-**Persistence without nesting.** Running a full remote nerdmux inside a nerdfleet pane would put two multiplexers on
-the same keys (`Alt+Space`, `Alt+arrows`) and show two status bars. Instead, nerdmux gets a `--plain` attach mode: no
-status bar, no key bindings, every key passed through, so it only keeps the session alive. If nerdmux is not on the
-host, the pane falls back to plain `ssh -t` and says that the shell will not survive a disconnect.
+**The same interface everywhere (2026-10-28).** The first build ran nerdmux in a `--plain` attach mode (no status
+bar, no keys, a `fleet` session on a server of its own), so that a remote nerdmux would never compete with a local
+one for `Alt+Space` and `Alt+arrows`. The user chose the full nerdmux instead: the same interface on every machine,
+with the leader pressed twice (`send-prefix`) when nerdfleet itself runs inside nerdmux. `--plain` stays in nerdmux,
+unused by nerdfleet for now.
 
 **As built (phase 4, 2026-10-25).** Checked on the Arch laptop (local, with nerdmux) and on host-a (over SSH; its
 nerdmux in `~/.cargo/bin` predates `--plain`, so it got the fallback).
 
-- **Keys.** `s` opens a shell on the selected host from the overview, or on the host in view. It is full screen, under
-  a one-line bar naming the host and the way back. Every key goes to the shell except `Ctrl+]`, which goes back to the
-  dashboard (terminals send it as byte 0x1d, which crossterm reads as `Ctrl+5`; both spellings count). `s` again, or
-  `Ctrl+]` from the dashboard, returns to the same shell, which kept running meanwhile. Pastes arrive bracketed.
-- **One shell per host.** It lives as long as the viewer. When it ends (the user typed `exit`, the connection dropped)
-  the bar says so and `Enter` starts a new one; with nerdmux on the host, that one attaches to the same session.
-- **What runs.** A fixed script, the same on every host, that looks for a nerdmux whose `--help` mentions `--plain`
-  on PATH, in `~/.local/bin` and in `~/.cargo/bin` (non-interactive SSH rarely has the last two on PATH). Paths with
-  anything but plain characters are skipped, checked with `grep`: dash, Ubuntu's `sh`, reads `[^...]` in a `case`
-  pattern literally. It starts
-  `nerdmux attach --plain -t fleet` through the user's login shell, so the session's shells get a login PATH. Without
-  one it prints why and starts a login shell. On this machine nerdfleet runs nerdmux, or `$SHELL`, directly.
-- **A server of its own.** `attach --plain` uses `plain.sock` beside nerdmux's default socket, so the fleet session
-  stays out of the user's session list, `kill-server` and restore, and an older nerdmux server already running
-  cannot refuse it.
+- **Keys.** `s` opens the terminal of the host in view (the selected one, from the overview) beside its host view,
+  so the shell sits next to that machine's graphs and processes, and gives it the keys; from the overview it opens
+  that host's view too. `s` again puts the terminal away; it keeps running and comes back as it was. `z` zooms it to
+  the whole screen. Every key goes to the terminal except `Ctrl+]` (terminals send it as byte 0x1d, which crossterm
+  reads as `Ctrl+5`; both spellings count), which gives the keys to the dashboard, bringing it back beside a zoomed
+  terminal; `Ctrl+]` on the dashboard gives them back. Pastes arrive bracketed.
+- **Layout.** Side by side from 160 columns, one above the other below that. As in nerdmux, both sit inside a ring
+  one cell wide with a separator between them, and the part that has the keys is outlined on all four edges with thin
+  lines hugging it (`▁ ▔ ▕ ▏`), in the theme's frame colors through `nerdmux::embed::frame_color`, fading from its top
+  left corner to its bottom right; the separator is otherwise in the border color, and the terminal is faded while
+  the dashboard has the keys. Zoomed, the terminal has the whole screen, without the ring. A terminal takes the size of the part it is drawn in each time it is drawn, so showing it, zooming or a
+  resize reaches the program as one resize.
+- **One terminal per host.** It lives as long as the viewer. When it ends (the user detached or typed `exit`, the
+  connection dropped) it is closed, and the dashboard gets the screen and the keys back: an ended terminal is never
+  left on screen. The next `s` starts a new one, which attaches to the same nerdmux session.
+- **What runs.** A fixed script, the same on every host, that looks for nerdmux on PATH, in `~/.local/bin` and in
+  `~/.cargo/bin` (non-interactive SSH rarely has the last two on PATH). Paths with anything but plain characters are
+  skipped, checked with `grep`: dash, Ubuntu's `sh`, reads `[^...]` in a `case` pattern literally. It starts nerdmux
+  through the user's login shell, so its shells get a login PATH. Without one it prints why and starts a login shell.
+  On this machine nerdfleet runs nerdmux directly, or `$SHELL` when it runs inside nerdmux itself.
 - **SSH.** The same options as the agent's connections (shared sign-in through the control socket, no agent, X11 or
   port forwarding, no local commands), with `-t` and without `BatchMode`: a terminal is where a password or second
   factor prompt can be answered. The remote command skips the agent's preamble, whose `umask 077` would otherwise be
@@ -582,18 +597,6 @@ nerdmux in `~/.cargo/bin` predates `--plain`, so it got the fallback).
   cannot set this machine's clipboard.
 - **Latency.** Input is read on a thread and wakes the loop together with pane output; frames are at most every 12 ms
   while a shell is busy.
-- **The host's nerdmux (2026-10-28).** `S` opens the host's nerdmux as the user knows it: status bar, windows, panes
-  and its key bindings, attached to the last session or a new one, on its default server. It is a second terminal per
-  host, beside the `s` shell, found by the same script without the `--plain` check, and falls back to a login shell.
-  Run inside a local nerdmux, the outer one takes its own keys first, so its leader must be pressed twice
-  (`send-prefix`) to reach the remote one; outside nerdmux every key but `Ctrl+]` gets through. On this machine `S`
-  refuses to run inside nerdmux, since attaching to the session that shows nerdfleet would draw it inside itself.
-  Checked on host-b: the leader and its help, `Alt+Enter` splits, and the session coming back on the next `S`.
-- **Split (2026-10-28).** `v` shows the dashboard and the terminal last shown (or a new shell on the host in view)
-  together: side by side from 160 columns, one above the other below that. `Ctrl+]` moves the keys between them,
-  and the terminal is faded while the dashboard has them; `s` and `S` swap in another terminal and `v` again closes the split. A terminal
-  takes the size of the part it is drawn in each time it is drawn, so a split, a resize or going full screen reaches
-  the program as one resize. Checked on host-b, with the shell in the fleet session at the right size.
 - **Not built yet:** mouse in panes, and cluster-job terminals (phase 5). Mouse needs a mouse call in
   `nerdmux::embed`, and capturing the mouse would take the terminal's own text selection away, so it would be an
   option.
@@ -608,13 +611,13 @@ nerdmux in `~/.cargo/bin` predates `--plain`, so it got the fallback).
 - **Host:** graphs for each metric group, a GPU panel per device, and the workload list. Enter on a workload shows its
   processes and details; `s` opens a terminal (`t` already switches the graphs' time window).
 - **Cluster:** jobs, partitions, and a node heatmap. Enter on a job shows its nodes with live detail.
-- **Terminal:** full-screen or split with the dashboard.
+- **Terminal:** beside the host view, or zoomed to the whole screen.
 
 Keys: arrows (or `Alt+arrows`, as in nerdmux) move between cards, and plain letters act on the dashboard: `q` quits.
 There are no vi-style letter keys. Run inside nerdmux, nerdfleet never sees nerdmux's leader (`Alt+Space`), so
 nerdfleet does not use a leader of its own on the dashboard. In a terminal every key goes to the shell except
-`Ctrl+]`, which goes back to the dashboard (see [Terminals](#terminals)). `s` opens a shell, `S` the host's nerdmux,
-and `v` splits the screen between the dashboard and a terminal. The theme is read from nerdmux's config, so
+`Ctrl+]`, which gives the keys back to the dashboard (see [Terminals](#terminals)). `s` shows or hides a host's
+terminal beside its view, `z` zooms it, and `r` tries a down host again. The theme is read from nerdmux's config, so
 both tools look the same.
 
 Every string that came from a host (hostnames, process names, command lines, model names, container names) is
@@ -795,6 +798,9 @@ Done (2026-10-25), in nerdmux `72b61aa` and `ac14b01`:
   otherwise. A session driven by a plain client has no status bar. Its keys skip the leader, chords and copy mode.
 - Tested end to end in nerdmux's suite on Linux. macOS waits for the Mac.
 
+Later (2026-10-28): `embed::frame_color`, the color of the focused pane's outline at a point along it, so nerdfleet
+draws its divider the way nerdmux draws its focus.
+
 nerdfleet depends on nerdmux as a crate, by path while both are in development and by version once nerdmux
 publishes.
 
@@ -857,10 +863,10 @@ Candidates to vet, none decided:
    - **Status (2026-10-25):** full-screen terminals built (see [Terminals](#terminals)). Checked live: on the laptop a
      shell in the fleet session, back and forth with `Ctrl+]`, the session surviving the viewer and reattached by
      the next one; on host-a the fallback login shell, with the host's own umask and no agent forwarding. host-a's
-     nerdmux predates `--plain`, so its shells do not survive a disconnect until a current nerdmux is installed there.
-   - **Status (2026-10-28):** the split layout and `S` for the host's own nerdmux, both checked on host-b, whose nerdmux
-     in `~/.local/bin` knows `--plain`: its `s` shell lives in the fleet session and is reattached by the next one.
-     Left: mouse in panes, and host-a once it is back.
+     nerdmux predates `--plain`, which stopped mattering on 2026-10-28, when the terminal became the full nerdmux.
+   - **Status (2026-10-28):** one terminal per host running the host's full nerdmux, beside the host view or zoomed,
+     with nerdmux's focus outline on the divider. Checked on host-b: showing, hiding, zooming and moving the keys, and
+     the terminal closing when its connection was cut. Left: mouse in panes, and host-a once it is back.
 5. **Clusters.**
    - Relay, `job-step` access, the Slurm adapter and the cluster view.
    - Tested later, against a local Slurm in containers first and a real cluster when one is available.

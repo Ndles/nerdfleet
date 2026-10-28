@@ -5,7 +5,7 @@
 //! red as it fills, because a full one is not.
 
 use super::app::HostView;
-use crate::conn::State;
+use crate::conn::{Retry, State, TRIES};
 use crate::model::{Gpu, GpuInfo, Kind, Power, Vendor, Workload};
 use nerdmux::embed::Theme;
 use ratatui::buffer::Buffer;
@@ -80,10 +80,7 @@ impl Ui<'_> {
             Span::styled(format!("  {live}/{} live", self.hosts.len()), Style::default().fg(t.status_fg)),
         ]);
         left.render(area, buf);
-        let keys = Line::from(Span::styled(
-            "←↑↓→ select  Enter open  s shell  S nerdmux  v split  q quit ",
-            Style::default().fg(t.dim),
-        ));
+        let keys = keys_line(t, &[("←↑↓→", "select"), ("Enter", "open"), ("s", "terminal"), ("q", "quit")]);
         let w = keys.width() as u16;
         if area.width > w + 20 {
             let r = Rect { x: area.x + area.width - w, width: w, ..area };
@@ -187,6 +184,45 @@ impl Ui<'_> {
 
 // ===== card contents ========================================================
 
+/// Key hints as nerdmux shows them: each key in cyan, what it does dimmed.
+pub fn keys_line(t: &Theme, keys: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (key, what)) in keys.iter().enumerate() {
+        let gap = if i + 1 == keys.len() { " " } else { "  " };
+        spans.push(Span::styled(key.to_string(), Style::default().fg(t.cyan)));
+        spans.push(Span::styled(format!(" {what}{gap}"), Style::default().fg(t.dim)));
+    }
+    Line::from(spans)
+}
+
+/// What a down host does next: try again (and which try that is), or wait
+/// for `r`.
+pub fn retry_line(t: &Theme, retry: &Retry) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(t.dim);
+    let key = Style::default().fg(t.accent).add_modifier(Modifier::BOLD);
+    match retry {
+        Retry::At(at, n) => {
+            let secs = at.saturating_duration_since(Instant::now()).as_millis().div_ceil(1000);
+            let when = if secs > 0 { format!("in {secs}s") } else { "now".into() };
+            vec![
+                Span::styled(format!("try {n} of {TRIES} {when} · "), dim),
+                Span::styled("r", key),
+                Span::styled(" now", dim),
+            ]
+        }
+        Retry::GaveUp => vec![
+            Span::styled(format!("stopped after {TRIES} tries · "), Style::default().fg(t.yellow)),
+            Span::styled("r", key),
+            Span::styled(" tries again", dim),
+        ],
+        Retry::NeedsUser => vec![
+            Span::styled("not retrying until that is fixed · ", Style::default().fg(t.yellow)),
+            Span::styled("r", key),
+            Span::styled(" tries again", dim),
+        ],
+    }
+}
+
 fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
     // Borders and a column of padding on each side.
     let iw = width.saturating_sub(4) as usize;
@@ -261,11 +297,10 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
         State::Connecting => lines.push(Line::from(Span::styled("connecting…", Style::default().fg(t.dim)))),
         State::Deploying => lines.push(Line::from(Span::styled("copying the agent…", Style::default().fg(t.dim)))),
         State::Down(why, retry) => {
-            let secs = retry.saturating_duration_since(Instant::now()).as_secs();
-            let when = if secs > 0 { format!(" · retry in {secs}s") } else { String::new() };
-            for chunk in wrap(&format!("down: {why}{when}"), iw).into_iter().take(3) {
+            for chunk in wrap(&format!("down: {why}"), iw).into_iter().take(3) {
                 lines.push(Line::from(Span::styled(chunk, Style::default().fg(t.red))));
             }
+            lines.push(Line::from(retry_line(t, retry)));
         }
     }
     // Unread alerts, newest first: what happened while nobody looked.

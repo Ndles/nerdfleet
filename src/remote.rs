@@ -103,7 +103,11 @@ impl Agents {
         }
         let carried: Vec<&str> = self.builds.iter().map(|b| b.target.as_str()).collect();
         let more = if self.embedded { "" } else { "; a release build carries agents for more" };
-        anyhow::bail!("the host is {target}, and this nerdfleet carries agents for {} only{more}", carried.join(", "))
+        Err(NeedsUser(format!(
+            "the host is {target}, and this nerdfleet carries agents for {} only{more}",
+            carried.join(", ")
+        ))
+        .into())
     }
 }
 
@@ -222,11 +226,11 @@ impl Ssh {
     pub fn probe(&self) -> anyhow::Result<String> {
         let out = self.script(PROBE, &[]).stdin(Stdio::null()).output()?;
         if !out.status.success() {
-            anyhow::bail!(explain(out.status.code(), &String::from_utf8_lossy(&out.stderr), &self.alias));
+            return Err(failure(out.status.code(), &String::from_utf8_lossy(&out.stderr), &self.alias));
         }
         let line = String::from_utf8_lossy(&out.stdout);
         target_from_uname(&line)
-            .ok_or_else(|| anyhow::anyhow!("unsupported system: {}", crate::text::clean(line.trim())))
+            .ok_or_else(|| NeedsUser(format!("unsupported system: {}", crate::text::clean(line.trim()))).into())
     }
 
     pub fn upload(&self, agent: &AgentBuild) -> anyhow::Result<()> {
@@ -240,7 +244,7 @@ impl Ssh {
         let written = child.stdin.take().expect("piped").write_all(&agent.bytes);
         let out = child.wait_with_output()?;
         if !out.status.success() {
-            anyhow::bail!(explain(out.status.code(), &String::from_utf8_lossy(&out.stderr), &self.alias));
+            return Err(failure(out.status.code(), &String::from_utf8_lossy(&out.stderr), &self.alias));
         }
         written?;
         Ok(())
@@ -265,6 +269,38 @@ impl Ssh {
 }
 
 /// A failed connection, in words that say what to do about it.
+/// A failure that trying again would only repeat: the user has to fix
+/// something first, such as a host key or a refused key.
+#[derive(Debug)]
+pub struct NeedsUser(pub String);
+
+impl std::fmt::Display for NeedsUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NeedsUser {}
+
+/// Whether `e`, or anything under it, is a `NeedsUser`.
+pub fn needs_user(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<NeedsUser>())
+}
+
+/// `explain` as an error, marked `NeedsUser` when waiting will not help.
+pub fn failure(code: Option<i32>, stderr: &str, alias: &str) -> anyhow::Error {
+    let why = explain(code, stderr, alias);
+    let stuck = ["Host key verification failed", "REMOTE HOST IDENTIFICATION HAS CHANGED", "Permission denied ("]
+        .iter()
+        .any(|s| stderr.contains(s))
+        || matches!(code, Some(EXIT_BAD_DIR | EXIT_MISMATCH));
+    if stuck {
+        NeedsUser(why).into()
+    } else {
+        anyhow::anyhow!(why)
+    }
+}
+
 pub fn explain(code: Option<i32>, stderr: &str, alias: &str) -> String {
     let stderr = crate::text::clean(stderr.trim());
     let hint = if stderr.contains("Host key verification failed") {
@@ -308,6 +344,17 @@ mod tests {
         let dev = Agents { builds: vec![build("x86_64-linux")], embedded: false };
         let err = dev.for_target("aarch64-linux").err().unwrap().to_string();
         assert!(err.ends_with("x86_64-linux only; a release build carries agents for more"), "{err}");
+    }
+
+    #[test]
+    fn failures_that_waiting_cannot_fix_are_marked() {
+        let stuck = |code, err: &str| needs_user(&failure(code, err, "h"));
+        assert!(stuck(Some(255), "alice@h: Permission denied (publickey)."));
+        assert!(stuck(Some(255), "Host key verification failed."));
+        assert!(stuck(Some(EXIT_BAD_DIR), ""));
+        assert!(!stuck(Some(255), "ssh: connect to host 10.0.0.1 port 22: Connection timed out"));
+        assert!(!stuck(Some(255), "ssh: Could not resolve hostname h: Name or service not known"));
+        assert!(!stuck(Some(1), "bash: /x: Permission denied"));
     }
 
     #[test]

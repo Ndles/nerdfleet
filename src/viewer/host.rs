@@ -70,7 +70,7 @@ fn spark(series: &VecDeque<u8>, newest: u64, cap: usize, width: usize) -> String
 pub const WINDOWS: [&str; 3] = ["15m", "6h", "24h"];
 
 /// Width of the column of names and numbers left of each graph.
-const GUTTER: usize = 38;
+const GUTTER: usize = 40;
 /// From this width, the lists below the graphs sit in two columns.
 const TWO_COLUMNS: u16 = 140;
 
@@ -89,14 +89,26 @@ impl HostUi<'_> {
             Span::styled(" nërdfleet ", Style::default().bg(t.accent).fg(t.accent_fg).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" › {} ", h.name), Style::default().fg(t.status_fg).add_modifier(Modifier::BOLD)),
         ];
-        if h.state != State::Live {
-            left.push(Span::styled(" not live ", Style::default().fg(t.red)));
+        match &h.state {
+            State::Live => {}
+            State::Down(_, retry) => {
+                left.push(Span::styled(" down ", Style::default().fg(t.red)));
+                left.push(Span::raw(" "));
+                left.extend(super::ui::retry_line(t, retry));
+            }
+            _ => left.push(Span::styled(" not live ", Style::default().fg(t.red))),
         }
-        Line::from(left).render(bar_area, buf);
-        let keys = "↑↓ workload  t window  s shell  S nerdmux  v split  Esc back  q quit ";
-        let kw = keys.chars().count() as u16;
-        if area.width > kw + 30 {
-            Span::styled(keys, dim).render(Rect { x: area.x + area.width - kw, width: kw, ..bar_area }, buf);
+        let left = Line::from(left);
+        let left_w = left.width() as u16;
+        left.render(bar_area, buf);
+        let keys = super::ui::keys_line(
+            t,
+            &[("↑↓", "workload"), ("t", "window"), ("s", "terminal"), ("z", "zoom"), ("Esc", "back"), ("q", "quit")],
+        );
+        let kw = keys.width() as u16;
+        // The keys only where they leave the left side whole.
+        if area.width > left_w.max(30) + kw {
+            keys.render(Rect { x: area.x + area.width - kw, width: kw, ..bar_area }, buf);
         }
 
         let inner = Rect {
@@ -144,15 +156,13 @@ impl HostUi<'_> {
         };
         put(
             Line::from(Span::styled(
-                format!(
-                    "{} · {} · kernel {} · {} · {} threads · {} RAM",
-                    inv.hostname,
-                    inv.os,
-                    inv.kernel,
-                    inv.cpu_model,
-                    inv.threads,
-                    gib(inv.mem_total)
-                ),
+                {
+                    // The kernel goes first when the line is too long.
+                    let tail = format!("{} · {} threads · {} RAM", inv.cpu_model, inv.threads, gib(inv.mem_total));
+                    let full = format!("{} · {} · kernel {} · {tail}", inv.hostname, inv.os, inv.kernel);
+                    let short = format!("{} · {} · {tail}", inv.hostname, inv.os);
+                    fit(if full.chars().count() <= w { &full } else { &short }, w)
+                },
                 dim,
             )),
             &mut y,
@@ -178,7 +188,8 @@ impl HostUi<'_> {
             rows.push(self.gpu_rows(i, info, g));
         }
         let free = (inner.y + inner.height).saturating_sub(y) as usize;
-        let free = free.saturating_sub(lower_h + 1);
+        // One row for the lists' gap, one for the time axis.
+        let free = free.saturating_sub(lower_h + 2);
         // Two rows at least, so each graph has room for its numbers; on a
         // short terminal the lists give way instead.
         let least = if inner.height >= 30 { 2 } else { 1 };
@@ -199,6 +210,13 @@ impl HostUi<'_> {
                 spans.extend(row);
                 put(Line::from(spans), &mut y);
             }
+            y += 1;
+        }
+        // The time axis under the last graph: how far back the left edge is.
+        if graph_w > 12 {
+            let ago = format!("{} ago", WINDOWS[current]);
+            let gap = graph_w.saturating_sub(ago.chars().count() + 3);
+            put(Line::from(Span::styled(format!("{}{ago}{}now", " ".repeat(GUTTER), " ".repeat(gap)), dim)), &mut y);
             y += 1;
         }
 
@@ -401,6 +419,12 @@ impl HostUi<'_> {
             facts.push(format!("GPUs idle {}", span(wl.gpu_idle_s as u64)));
         }
         lines.push(Line::from(Span::styled(facts.join(" · "), dim)));
+        if !wl.model.is_empty() {
+            for (i, chunk) in wrap(&wl.model, width.saturating_sub(8)).into_iter().take(3).enumerate() {
+                let lead = if i == 0 { "models  " } else { "        " };
+                lines.push(Line::from(vec![Span::styled(lead, dim), Span::styled(chunk, Style::default().fg(t.fg))]));
+            }
+        }
         if stalled {
             lines.push(Line::from(Span::styled(
                 "possibly stalled: its processes are alive but its GPUs have done almost nothing",
@@ -522,8 +546,14 @@ impl HostUi<'_> {
                 Some(w) => (w.label.as_str(), Style::default().fg(kind_color(t, w.kind))),
                 None => ("-", dim),
             };
-            let text =
-                if mine { Style::default().fg(t.fg).add_modifier(Modifier::BOLD) } else { Style::default().fg(t.fg) };
+            // A process doing nothing right now is there for its memory; it
+            // steps back.
+            let idle = p.cpu < 0.05 && p.gpu_mem == 0;
+            let text = match (mine, idle) {
+                (true, _) => Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
+                (false, true) => dim,
+                (false, false) => Style::default().fg(t.fg),
+            };
             lines.push(Line::from(vec![
                 Span::styled(format!("{:>8}  ", p.pid), dim),
                 Span::styled(format!("{:<name_w$}", fit(&p.name, name_w.saturating_sub(1))), text),
@@ -582,7 +612,8 @@ fn graph_rows(cells: &[u8], height: usize, color: Color, track: Color) -> Vec<Ve
                 let (ch, c) = if v == NONE {
                     (' ', None)
                 } else {
-                    let filled = (v.min(100) as usize * height * 8 + 50) / 100;
+                    // Anything above zero shows, so a quiet line stays a line.
+                    let filled = ((v.min(100) as usize * height * 8 + 50) / 100).max(usize::from(v > 0));
                     let here = filled.saturating_sub(from_bottom * 8).min(8);
                     match here {
                         0 if from_bottom == 0 => ('▁', Some(track)),
@@ -809,5 +840,29 @@ mod tests {
         assert_eq!(spark(&VecDeque::new(), 0, HISTORY, 3), "   ");
         let gaps: VecDeque<u8> = [50, NONE, NONE, 50].into_iter().collect();
         assert_eq!(spark(&gaps, 3, 4, 4), "▅  ▅", "a gap is blank, not bridged");
+    }
+}
+
+#[cfg(test)]
+mod bar_tests {
+    use super::HostUi;
+    use crate::config::{Access, Host};
+    use crate::conn::{Retry, State};
+    use crate::viewer::app::HostView;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn the_keys_never_cover_what_a_down_host_does_next() {
+        let theme = nerdmux::embed::Theme::default();
+        let mut host = HostView::new(&Host { name: "host-a".into(), access: Access::Local });
+        host.set_state(State::Down("connection timed out".into(), Retry::GaveUp));
+        for width in [80, 99, 115, 133, 160, 200] {
+            let area = Rect::new(0, 0, width, 20);
+            let mut buf = Buffer::empty(area);
+            HostUi { theme: &theme, host: &host, selected: 0, own_bg: false, window: 0 }.draw(area, &mut buf);
+            let bar: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+            assert!(bar.contains("r tries again"), "{width}: {bar}");
+        }
     }
 }

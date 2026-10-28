@@ -64,15 +64,20 @@ Colors come from `~/.config/nerd-theme.toml`, the theme the Nërd tools share; s
 [nerdmux](https://github.com/Ndles/nerdmux#configuration) for what it can set.
 
 Arrows (or `Alt+arrows`, as in nerdmux) move between hosts, `Enter` opens one, `Esc` goes back, and `q` or `Ctrl+C`
-quits. `s` opens a shell on the host, full screen; `Ctrl+]` goes back to the dashboard and `s` (or `Ctrl+]` again)
-returns to it. With [nerdmux](../nerdmux) on the host the shell lives in a nerdmux session, so it survives a dropped
-connection and the next `s` picks it up; without it, you get a plain login shell, and the terminal says so. `S` opens
-the host's own nerdmux instead, status bar, windows and keys included, attached to your last session there. `v` puts
-the dashboard and the terminal side by side (one above the other on narrower screens); `Ctrl+]` moves the keys between
-them, and `v` again gives the dashboard the whole screen.
+quits. `s` opens a terminal on the host beside its graphs and processes (below them on narrower screens), and `s`
+again puts it away, still running. It runs the host's own [nerdmux](../nerdmux), status bar, windows and keys
+included, attached to your last session there, so every machine has the same interface and its sessions survive a
+dropped connection. A host without nerdmux gets a login shell, which ends with the connection. `Ctrl+]` moves the keys
+between the dashboard and the terminal, and a thin line on the divider, the same as nerdmux's focus outline, hugs
+whichever side has them. `z` zooms the terminal to the whole screen; `Ctrl+]` brings the dashboard back beside it.
 
-If nerdfleet itself runs inside nerdmux, that nerdmux keeps its own keys (`Alt+Space`, `Alt+arrows`), so with `S` you
-press the leader twice to reach the remote one. `S` on the machine nerdfleet runs on works only outside nerdmux.
+A host that goes away is tried 8 times over about three minutes, and its card says which try is next. Then nerdfleet
+stops trying until you press `r` on it. A refused key or an unknown host key is not retried at all, since trying
+again would fail the same way.
+
+If nerdfleet itself runs inside nerdmux, that nerdmux keeps its own keys (`Alt+Space`, `Alt+arrows`), so you press
+the leader twice to reach the remote one. On the machine nerdfleet runs on, inside nerdmux, the terminal is a plain
+shell, since attaching to your own session would draw nerdfleet inside itself.
 
 Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
 (`CPU`), named the way you would name them (`torchrun train.py`, `llama-swap · Qwen3-8B-Q4_K_M`). The host view adds

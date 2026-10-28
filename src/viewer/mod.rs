@@ -12,10 +12,11 @@ use app::HostView;
 use crossterm::event::{self as term, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::{execute, terminal};
 use nerdmux::embed::TerminalEvent;
+use nerdmux::embed::Theme;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 use ratatui::Terminal;
-use shell::Kind;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -34,37 +35,89 @@ enum Mode {
 }
 
 /// The terminal on screen, and how it shares the screen with the dashboard.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 struct Panes {
-    /// Whose terminal, and which kind.
-    term: Option<(usize, Kind)>,
-    /// The dashboard and the terminal side by side, or one above the other.
-    split: bool,
-    /// Keys go to the terminal. Without `split`, it has the whole screen.
+    /// Whose terminal is shown: beside the dashboard, or zoomed.
+    term: Option<usize>,
+    /// The terminal has the whole screen, and the keys.
+    zoom: bool,
+    /// Keys go to the terminal.
     focus: bool,
 }
 
-/// From this width, a split puts the terminal beside the dashboard rather
-/// than below it.
+/// From this width, the terminal goes beside the dashboard rather than
+/// below it.
 const SIDE_BY_SIDE: u16 = 160;
 
 /// The parts of `area` for the dashboard and for a terminal with its bar;
-/// either may be missing.
+/// either may be missing. Together, as in nerdmux, they sit inside a ring
+/// one cell wide, with one column (side by side) or one row (one above the
+/// other) between them: room for the separator and the focus outline.
 fn layout(area: Rect, panes: Panes) -> (Option<Rect>, Option<Rect>) {
-    match (panes.term.is_some(), panes.split, panes.focus) {
-        (false, ..) | (true, false, false) => (Some(area), None),
-        (true, false, true) => (None, Some(area)),
-        (true, true, _) if area.width >= SIDE_BY_SIDE => {
-            let w = area.width / 2;
-            (Some(Rect { width: area.width - w, ..area }), Some(Rect { x: area.x + area.width - w, width: w, ..area }))
-        }
-        (true, true, _) => {
-            let h = area.height / 2;
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    match (panes.term.is_some(), panes.zoom) {
+        (false, _) => (Some(area), None),
+        (true, true) => (None, Some(area)),
+        _ if area.width >= SIDE_BY_SIDE => {
+            let w = inner.width / 2;
             (
-                Some(Rect { height: area.height - h, ..area }),
-                Some(Rect { y: area.y + area.height - h, height: h, ..area }),
+                Some(Rect { width: inner.width.saturating_sub(w + 1), ..inner }),
+                Some(Rect { x: inner.x + inner.width - w, width: w, ..inner }),
             )
         }
+        _ => {
+            let h = inner.height / 2;
+            (
+                Some(Rect { height: inner.height.saturating_sub(h + 1), ..inner }),
+                Some(Rect { y: inner.y + inner.height - h, height: h, ..inner }),
+            )
+        }
+    }
+}
+
+/// The separator between the dashboard and the terminal, and the outline
+/// of the one with the keys, drawn as nerdmux draws its panes: a plain
+/// line in the border color between them, and thin lines hugging the
+/// focused one's four edges in the theme's frame colors, fading from its
+/// top left corner to its bottom right.
+fn draw_frame(buf: &mut ratatui::buffer::Buffer, dash: Rect, term: Rect, term_focused: bool, theme: &Theme) {
+    let normal = Style::default().fg(theme.border);
+    if term.x > dash.x + dash.width {
+        for y in dash.y..dash.y + dash.height {
+            buf[(dash.x + dash.width, y)].set_symbol("│").set_style(normal);
+        }
+    } else {
+        for x in dash.x..dash.x + dash.width {
+            buf[(x, dash.y + dash.height)].set_symbol("─").set_style(normal);
+        }
+    }
+    let act = if term_focused { term } else { dash };
+    if act.width == 0 || act.height == 0 || act.x == 0 || act.y == 0 {
+        return;
+    }
+    let area = buf.area;
+    let (left, top) = (act.x - 1, act.y - 1);
+    let (right, bottom) = (act.x + act.width, act.y + act.height);
+    let (span_x, span_y) = ((right - left).max(1) as f32, (bottom - top).max(1) as f32);
+    let mut mark = |x: u16, y: u16, glyph: &str| {
+        if x < area.x + area.width && y < area.y + area.height {
+            let t = ((x - left) as f32 / span_x + (y - top) as f32 / span_y) / 2.0;
+            let color = nerdmux::embed::frame_color(theme, t);
+            buf[(x, y)].set_symbol(glyph).set_style(Style::default().fg(color));
+        }
+    };
+    for x in left + 1..right {
+        mark(x, top, "▁");
+        mark(x, bottom, "▔");
+    }
+    for y in top + 1..bottom {
+        mark(left, y, "▕");
+        mark(right, y, "▏");
     }
 }
 
@@ -165,7 +218,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         })?;
     }
     // One terminal of each kind per host at most, kept while others show.
-    let mut shells: Vec<[Option<shell::Shell>; 2]> = config.hosts.iter().map(|_| [None, None]).collect();
+    let mut shells: Vec<Option<shell::Shell>> = config.hosts.iter().map(|_| None).collect();
     let mut next_shell = 0u32;
     let mut panes = Panes::default();
     let mut selected = 0usize;
@@ -181,55 +234,43 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         while let Some(w) = woke.take().or_else(|| wake_rx.try_recv().ok()) {
             match w {
                 Wake::Pane(TerminalEvent::Output(id, bytes)) => {
-                    if let Some((slot, s)) = find_shell(&mut shells, id) {
+                    if let Some((host, s)) = find_shell(&mut shells, id) {
                         s.feed(&bytes);
-                        dirty |= panes.term == Some(slot) && (panes.split || panes.focus);
+                        dirty |= panes.term == Some(host);
                     }
                 }
                 Wake::Pane(TerminalEvent::Eof(id) | TerminalEvent::Exit(id)) => {
-                    if let Some((_, s)) = find_shell(&mut shells, id) {
-                        s.ended = true;
+                    // A terminal whose program ended is closed, and the
+                    // dashboard gets the screen and the keys back; `s`
+                    // starts a new one (which finds the nerdmux session
+                    // again, if the connection was what ended).
+                    if let Some((host, _)) = find_shell(&mut shells, id) {
+                        shells[host] = None;
+                        if panes.term == Some(host) {
+                            panes = Panes::default();
+                        }
                         dirty = true;
                     }
                 }
                 // The terminal on screen takes its new size as it is drawn.
                 Wake::Input(TermEvent::Resize(..)) => dirty = true,
                 Wake::Input(TermEvent::Paste(text)) => {
-                    if let Some((host, kind)) = panes.term.filter(|_| panes.focus) {
-                        if let Some(s) = shells[host][kind as usize].as_mut().filter(|s| !s.ended) {
-                            s.pane.paste(&text);
-                        }
+                    if let Some(s) = panes.term.filter(|_| panes.focus).and_then(|h| shells[h].as_mut()) {
+                        s.pane.paste(&text);
                     }
                 }
                 Wake::Input(TermEvent::Key(k)) if k.kind != KeyEventKind::Release => {
                     dirty = true;
-                    // In a terminal every key is the program's, but one.
-                    if let Some((host, kind)) = panes.term.filter(|_| panes.focus) {
-                        // Ctrl+] leaves, and so does any key when the terminal
-                        // failed to start again.
-                        let Some(s) = shells[host][kind as usize].as_mut().filter(|_| !shell::is_escape(&k)) else {
-                            panes.focus = false;
-                            continue;
-                        };
-                        if s.ended {
-                            if k.code == KeyCode::Enter {
-                                let size = term_size(&term, panes)?;
-                                if let Err(e) = open_shell(
-                                    &mut shells,
-                                    &config,
-                                    host,
-                                    kind,
-                                    &control_dir,
-                                    &mut next_shell,
-                                    size,
-                                    &wake_tx,
-                                ) {
-                                    hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
-                                    panes.focus = false;
-                                }
+                    // In a terminal every key is the program's, but one:
+                    // Ctrl+] gives the keys to the dashboard, which comes
+                    // back beside a zoomed terminal.
+                    if let Some(host) = panes.term.filter(|_| panes.focus) {
+                        match shells[host].as_mut() {
+                            Some(s) if !shell::is_escape(&k) => {
+                                s.pane.send_key(k);
                             }
-                        } else {
-                            s.pane.send_key(k);
+                            Some(_) => panes = Panes { zoom: false, focus: false, ..panes },
+                            None => panes = Panes::default(),
                         }
                         continue;
                     }
@@ -242,66 +283,42 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         Mode::Host { host, .. } => host,
                         Mode::Overview => selected,
                     };
-                    // `s`: a shell on the host in view, or the selected one;
-                    // `S`: that host's own nerdmux.
-                    if let KeyCode::Char(c @ ('s' | 'S')) = k.code {
-                        if (k.modifiers - KeyModifiers::SHIFT).is_empty() && !hosts.is_empty() {
-                            let kind = if c == 's' { Kind::Shell } else { Kind::Nerdmux };
-                            let next = Panes { term: Some((in_view, kind)), focus: true, ..panes };
-                            let size = term_size(&term, next)?;
-                            let slot = &shells[in_view][kind as usize];
-                            if slot.as_ref().is_none_or(|s| s.ended) {
-                                if let Err(e) = open_shell(
-                                    &mut shells,
-                                    &config,
-                                    in_view,
-                                    kind,
-                                    &control_dir,
-                                    &mut next_shell,
-                                    size,
-                                    &wake_tx,
-                                ) {
-                                    hosts[in_view].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
-                                    continue;
-                                }
-                            }
-                            panes = next;
+                    // `s`: the terminal of the host in view (the selected
+                    // one, from the overview) beside its stats, or, when it
+                    // is there already, away; it keeps running meanwhile.
+                    // `z`: that terminal zoomed to the whole screen.
+                    if let KeyCode::Char(c @ ('s' | 'z')) = k.code {
+                        if !k.modifiers.is_empty() || hosts.is_empty() {
                             continue;
                         }
-                    }
-                    // Ctrl+]: back to the terminal last shown.
-                    if shell::is_escape(&k) {
-                        panes.focus = panes.term.is_some_and(|(h, kind)| shells[h][kind as usize].is_some());
-                        continue;
-                    }
-                    // `v`: the dashboard and a terminal together, or not. A
-                    // split starts with the terminal last shown, or a shell
-                    // on the host in view.
-                    if k.code == KeyCode::Char('v') && k.modifiers.is_empty() && !hosts.is_empty() {
-                        if panes.split {
-                            panes.split = false;
+                        if c == 's' && panes.term == Some(in_view) {
+                            panes = Panes::default();
                             continue;
                         }
-                        let term_now = panes.term.filter(|&(h, kind)| shells[h][kind as usize].is_some());
-                        let next =
-                            Panes { term: Some(term_now.unwrap_or((in_view, Kind::Shell))), split: true, focus: true };
-                        if term_now.is_none() {
+                        let next = Panes { term: Some(in_view), zoom: c == 'z', focus: true };
+                        if shells[in_view].is_none() {
                             let size = term_size(&term, next)?;
-                            if let Err(e) = open_shell(
-                                &mut shells,
-                                &config,
-                                in_view,
-                                Kind::Shell,
-                                &control_dir,
-                                &mut next_shell,
-                                size,
-                                &wake_tx,
-                            ) {
+                            if let Err(e) =
+                                open_shell(&mut shells, &config, in_view, &control_dir, &mut next_shell, size, &wake_tx)
+                            {
                                 hosts[in_view].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
                                 continue;
                             }
                         }
                         panes = next;
+                        show_host(&mut mode, &shared, in_view);
+                        continue;
+                    }
+                    // Ctrl+]: the keys back to the terminal beside.
+                    if shell::is_escape(&k) {
+                        panes.focus = panes.term.is_some();
+                        continue;
+                    }
+                    // `r`: a down host tries again now.
+                    if k.code == KeyCode::Char('r') && k.modifiers.is_empty() && !hosts.is_empty() {
+                        if matches!(hosts[in_view].state, crate::conn::State::Down(..)) {
+                            shared.retry_now(in_view);
+                        }
                         continue;
                     }
                     if let Mode::Host { host, workload, window } = mode {
@@ -360,7 +377,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                 dirty = true;
             }
         }
-        for s in shells.iter_mut().flatten().flatten() {
+        for s in shells.iter_mut().flatten() {
             dirty |= s.pane.tick(now);
         }
 
@@ -372,7 +389,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             dirty = true;
         }
         let mut read_changed = false;
-        let dashboard_shown = !(panes.term.is_some() && panes.focus && !panes.split);
+        let dashboard_shown = !(panes.term.is_some() && panes.zoom);
         for (i, h) in hosts.iter_mut().enumerate() {
             h.check_reachable();
             // Alerts that just happened go to the desktop too, unless the
@@ -413,15 +430,18 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     .draw(area, f.buffer_mut()),
                 }
             }
-            let (Some(area), Some((host, kind))) = (pane, panes.term) else { return };
-            let Some(s) = shells[host][kind as usize].as_mut() else { return };
+            let (Some(area), Some(host)) = (pane, panes.term) else { return };
+            let Some(s) = shells[host].as_mut() else { return };
+            if let Some(d) = dash {
+                draw_frame(f.buffer_mut(), d, area, panes.focus, &theme);
+            }
             let bar = Rect { height: 1.min(area.height), ..area };
             let body = below_bar(area);
             s.fit(body.width, body.height);
             let buf = f.buffer_mut();
-            shell::draw_bar(buf, bar, &theme, &hosts[host].name, s, panes.focus);
-            s.pane.draw(buf, body, &theme, panes.focus && !s.ended);
-            if let Some(c) = s.pane.cursor().filter(|_| panes.focus && !s.ended) {
+            shell::draw_bar(buf, bar, &theme, &hosts[host].name, s, panes.focus, dash.is_none());
+            s.pane.draw(buf, body, &theme, panes.focus);
+            if let Some(c) = s.pane.cursor().filter(|_| panes.focus) {
                 if c.col < body.width && c.row < body.height {
                     f.set_cursor_position((body.x + c.col, body.y + c.row));
                 }
@@ -440,38 +460,39 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
     result
 }
 
-fn find_shell(shells: &mut [[Option<shell::Shell>; 2]], id: u32) -> Option<((usize, Kind), &mut shell::Shell)> {
-    shells
-        .iter_mut()
-        .enumerate()
-        .find_map(|(i, pair)| pair.iter_mut().flatten().find(|s| s.id == id).map(|s| ((i, s.kind), s)))
+/// The dashboard shows `host` up close, asking it for detail.
+fn show_host(mode: &mut Mode, shared: &Shared, host: usize) {
+    if !matches!(*mode, Mode::Host { host: h, .. } if h == host) {
+        shared.set_detail(host, true);
+        *mode = Mode::Host { host, workload: 0, window: 0 };
+    }
+}
+
+fn find_shell(shells: &mut [Option<shell::Shell>], id: u32) -> Option<(usize, &mut shell::Shell)> {
+    shells.iter_mut().enumerate().find_map(|(i, s)| s.as_mut().filter(|s| s.id == id).map(|s| (i, s)))
 }
 
 /// The size, columns by rows, of the terminal that `panes` puts on screen.
 fn term_size(term: &Terminal<CrosstermBackend<std::io::Stdout>>, panes: Panes) -> anyhow::Result<(u16, u16)> {
     let size = term.size()?;
-    let area = layout(Rect::new(0, 0, size.width, size.height), panes)
-        .1
-        .map_or(Rect::new(0, 0, size.width, size.height), below_bar);
-    Ok((area.width, area.height))
+    let area = Rect::new(0, 0, size.width, size.height);
+    let r = layout(area, panes).1.map_or(area, below_bar);
+    Ok((r.width, r.height))
 }
 
-/// Starts a terminal of `kind` on host `host`, in place of any it had.
-#[allow(clippy::too_many_arguments)]
+/// Starts the terminal on host `host`, in place of any it had.
 fn open_shell(
-    shells: &mut [[Option<shell::Shell>; 2]],
+    shells: &mut [Option<shell::Shell>],
     config: &Config,
     host: usize,
-    kind: Kind,
     control_dir: &Path,
     next: &mut u32,
     size: (u16, u16),
     tx: &mpsc::SyncSender<Wake>,
 ) -> anyhow::Result<()> {
-    let slot = &mut shells[host][kind as usize];
-    *slot = None;
+    shells[host] = None;
     *next += 1;
-    *slot = Some(shell::open(&config.hosts[host], kind, control_dir, *next, size, tx.clone())?);
+    shells[host] = Some(shell::open(&config.hosts[host], control_dir, *next, size, tx.clone())?);
     Ok(())
 }
 
@@ -731,7 +752,7 @@ mod tests {
             host(
                 "gone",
                 vec![],
-                State::Down("no such host: is `gone` in ~/.ssh/config?".into(), std::time::Instant::now()),
+                State::Down("no such host: is `gone` in ~/.ssh/config?".into(), crate::conn::Retry::GaveUp),
             ),
         ];
         let screen = render(&hosts, 110, 40);
@@ -776,22 +797,37 @@ mod tests {
     }
 
     #[test]
-    fn a_split_shares_the_screen_and_a_terminal_alone_takes_it() {
-        use super::{layout, Panes, SIDE_BY_SIDE};
-        use crate::viewer::shell::Kind;
-        let term = Some((0, Kind::Shell));
+    fn a_terminal_goes_beside_the_dashboard_or_takes_the_screen_zoomed() {
+        use super::{draw_frame, layout, Panes, SIDE_BY_SIDE};
+        let term = Some(0);
         let wide = Rect::new(0, 0, SIDE_BY_SIDE, 50);
-        let (d, t) = layout(wide, Panes { term, split: true, focus: false });
+        let (d, t) = layout(wide, Panes { term, zoom: false, focus: false });
         let (d, t) = (d.unwrap(), t.unwrap());
-        assert_eq!((d.x, d.width + t.width, t.x), (0, SIDE_BY_SIDE, d.width), "side by side");
-        assert_eq!((d.height, t.height), (50, 50));
+        assert_eq!((d.x, d.y, t.y), (1, 1, 1), "a ring around both");
+        assert_eq!((d.width + 1 + t.width, t.x), (SIDE_BY_SIDE - 2, d.x + d.width + 1), "a separator between");
+        assert_eq!((d.height, t.height), (48, 48));
+        // The focused side is outlined on all four edges; the separator
+        // between them belongs to whichever has the keys.
+        let theme = nerdmux::embed::Theme::default();
+        let glyphs = |focus: bool| {
+            let mut buf = Buffer::empty(wide);
+            draw_frame(&mut buf, d, t, focus, &theme);
+            let at = |x: u16, y: u16| buf[(x, y)].symbol().to_string();
+            [at(d.x + 2, 0), at(d.x + 2, d.y + d.height), at(0, 10), at(d.x + d.width, 10), at(t.x + 2, 0)]
+        };
+        assert_eq!(glyphs(false), ["▁", "▔", "▕", "▏", " "], "the dashboard outlined");
+        assert_eq!(glyphs(true), [" ", " ", " ", "▕", "▁"], "the terminal outlined");
+
         let narrow = Rect::new(0, 0, 100, 41);
-        let (d, t) = layout(narrow, Panes { term, split: true, focus: true });
+        let (d, t) = layout(narrow, Panes { term, zoom: false, focus: true });
         let (d, t) = (d.unwrap(), t.unwrap());
-        assert_eq!((d.height + t.height, t.y, t.width), (41, d.height, 100), "one above the other");
-        assert_eq!(layout(narrow, Panes { term, split: false, focus: true }), (None, Some(narrow)));
-        assert_eq!(layout(narrow, Panes { term, split: false, focus: false }), (Some(narrow), None));
-        assert_eq!(layout(narrow, Panes { term: None, split: true, focus: true }), (Some(narrow), None));
+        assert_eq!((d.height + 1 + t.height, t.y, t.width), (39, d.y + d.height + 1, 98), "one above the other");
+        let mut buf = Buffer::empty(narrow);
+        draw_frame(&mut buf, d, t, true, &theme);
+        assert_eq!(buf[(5, d.y + d.height)].symbol(), "▁", "the terminal's top edge, on the separator");
+        assert_eq!(buf[(5, t.y + t.height)].symbol(), "▔");
+        assert_eq!(layout(narrow, Panes { term, zoom: true, focus: true }), (None, Some(narrow)));
+        assert_eq!(layout(narrow, Panes { term: None, zoom: false, focus: false }), (Some(narrow), None));
         // The dashboard draws in either half without trouble.
         let hosts = vec![host("gpu-box", vec![nvidia()], State::Live), host("apu-box", vec![apu()], State::Live)];
         render(&hosts, SIDE_BY_SIDE / 2, 20);
