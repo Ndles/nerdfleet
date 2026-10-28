@@ -15,12 +15,13 @@ use nerdmux::embed::TerminalEvent;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
+use shell::Kind;
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// What the screen shows.
+/// What the dashboard shows.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Overview,
@@ -30,10 +31,46 @@ enum Mode {
         workload: usize,
         window: usize,
     },
-    /// A terminal on a host, full screen.
-    Shell {
-        host: usize,
-    },
+}
+
+/// The terminal on screen, and how it shares the screen with the dashboard.
+#[derive(Clone, Copy, Default)]
+struct Panes {
+    /// Whose terminal, and which kind.
+    term: Option<(usize, Kind)>,
+    /// The dashboard and the terminal side by side, or one above the other.
+    split: bool,
+    /// Keys go to the terminal. Without `split`, it has the whole screen.
+    focus: bool,
+}
+
+/// From this width, a split puts the terminal beside the dashboard rather
+/// than below it.
+const SIDE_BY_SIDE: u16 = 160;
+
+/// The parts of `area` for the dashboard and for a terminal with its bar;
+/// either may be missing.
+fn layout(area: Rect, panes: Panes) -> (Option<Rect>, Option<Rect>) {
+    match (panes.term.is_some(), panes.split, panes.focus) {
+        (false, ..) | (true, false, false) => (Some(area), None),
+        (true, false, true) => (None, Some(area)),
+        (true, true, _) if area.width >= SIDE_BY_SIDE => {
+            let w = area.width / 2;
+            (Some(Rect { width: area.width - w, ..area }), Some(Rect { x: area.x + area.width - w, width: w, ..area }))
+        }
+        (true, true, _) => {
+            let h = area.height / 2;
+            (
+                Some(Rect { height: area.height - h, ..area }),
+                Some(Rect { y: area.y + area.height - h, height: h, ..area }),
+            )
+        }
+    }
+}
+
+/// A terminal's part without its one-line bar.
+fn below_bar(r: Rect) -> Rect {
+    Rect { y: r.y + 1.min(r.height), height: r.height.saturating_sub(1), ..r }
 }
 
 /// Puts the terminal back however the viewer ends, panics included.
@@ -127,10 +164,10 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             }
         })?;
     }
-    // One terminal per host at most, kept while the dashboard shows.
-    let mut shells: Vec<Option<shell::Shell>> = config.hosts.iter().map(|_| None).collect();
+    // One terminal of each kind per host at most, kept while others show.
+    let mut shells: Vec<[Option<shell::Shell>; 2]> = config.hosts.iter().map(|_| [None, None]).collect();
     let mut next_shell = 0u32;
-    let mut before_shell = Mode::Overview;
+    let mut panes = Panes::default();
     let mut selected = 0usize;
     let mut scroll = 0u16;
     let mut dirty = true;
@@ -144,9 +181,9 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
         while let Some(w) = woke.take().or_else(|| wake_rx.try_recv().ok()) {
             match w {
                 Wake::Pane(TerminalEvent::Output(id, bytes)) => {
-                    if let Some((i, s)) = find_shell(&mut shells, id) {
+                    if let Some((slot, s)) = find_shell(&mut shells, id) {
                         s.feed(&bytes);
-                        dirty |= mode == Mode::Shell { host: i };
+                        dirty |= panes.term == Some(slot) && (panes.split || panes.focus);
                     }
                 }
                 Wake::Pane(TerminalEvent::Eof(id) | TerminalEvent::Exit(id)) => {
@@ -155,34 +192,40 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         dirty = true;
                     }
                 }
-                Wake::Input(TermEvent::Resize(cols, rows)) => {
-                    for s in shells.iter_mut().flatten() {
-                        s.pane.resize(cols, rows.saturating_sub(1));
-                    }
-                    dirty = true;
-                }
+                // The terminal on screen takes its new size as it is drawn.
+                Wake::Input(TermEvent::Resize(..)) => dirty = true,
                 Wake::Input(TermEvent::Paste(text)) => {
-                    if let Mode::Shell { host } = mode {
-                        if let Some(s) = shells[host].as_mut().filter(|s| !s.ended) {
+                    if let Some((host, kind)) = panes.term.filter(|_| panes.focus) {
+                        if let Some(s) = shells[host][kind as usize].as_mut().filter(|s| !s.ended) {
                             s.pane.paste(&text);
                         }
                     }
                 }
                 Wake::Input(TermEvent::Key(k)) if k.kind != KeyEventKind::Release => {
                     dirty = true;
-                    // In a terminal every key is the shell's, but one.
-                    if let Mode::Shell { host } = mode {
-                        let Some(s) = shells[host].as_mut() else { continue };
-                        if shell::is_escape(&k) {
-                            mode = before_shell;
-                        } else if s.ended {
+                    // In a terminal every key is the program's, but one.
+                    if let Some((host, kind)) = panes.term.filter(|_| panes.focus) {
+                        // Ctrl+] leaves, and so does any key when the terminal
+                        // failed to start again.
+                        let Some(s) = shells[host][kind as usize].as_mut().filter(|_| !shell::is_escape(&k)) else {
+                            panes.focus = false;
+                            continue;
+                        };
+                        if s.ended {
                             if k.code == KeyCode::Enter {
-                                shells[host] = None;
-                                match open_shell(&config.hosts[host], &control_dir, &mut next_shell, &term, &wake_tx) {
-                                    Ok(s) => shells[host] = Some(s),
-                                    Err(e) => {
-                                        hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")))
-                                    }
+                                let size = term_size(&term, panes)?;
+                                if let Err(e) = open_shell(
+                                    &mut shells,
+                                    &config,
+                                    host,
+                                    kind,
+                                    &control_dir,
+                                    &mut next_shell,
+                                    size,
+                                    &wake_tx,
+                                ) {
+                                    hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
+                                    panes.focus = false;
                                 }
                             }
                         } else {
@@ -195,24 +238,70 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     {
                         break 'main Ok(());
                     }
-                    // `s`: a shell on the host in view, or the selected one.
-                    if k.code == KeyCode::Char('s') && k.modifiers.is_empty() && !hosts.is_empty() {
-                        let host = match mode {
-                            Mode::Host { host, .. } => host,
-                            _ => selected,
-                        };
-                        if shells[host].as_ref().is_none_or(|s| s.ended) {
-                            shells[host] = None;
-                            match open_shell(&config.hosts[host], &control_dir, &mut next_shell, &term, &wake_tx) {
-                                Ok(s) => shells[host] = Some(s),
-                                Err(e) => {
-                                    hosts[host].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
+                    let in_view = match mode {
+                        Mode::Host { host, .. } => host,
+                        Mode::Overview => selected,
+                    };
+                    // `s`: a shell on the host in view, or the selected one;
+                    // `S`: that host's own nerdmux.
+                    if let KeyCode::Char(c @ ('s' | 'S')) = k.code {
+                        if (k.modifiers - KeyModifiers::SHIFT).is_empty() && !hosts.is_empty() {
+                            let kind = if c == 's' { Kind::Shell } else { Kind::Nerdmux };
+                            let next = Panes { term: Some((in_view, kind)), focus: true, ..panes };
+                            let size = term_size(&term, next)?;
+                            let slot = &shells[in_view][kind as usize];
+                            if slot.as_ref().is_none_or(|s| s.ended) {
+                                if let Err(e) = open_shell(
+                                    &mut shells,
+                                    &config,
+                                    in_view,
+                                    kind,
+                                    &control_dir,
+                                    &mut next_shell,
+                                    size,
+                                    &wake_tx,
+                                ) {
+                                    hosts[in_view].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
                                     continue;
                                 }
                             }
+                            panes = next;
+                            continue;
                         }
-                        before_shell = mode;
-                        mode = Mode::Shell { host };
+                    }
+                    // Ctrl+]: back to the terminal last shown.
+                    if shell::is_escape(&k) {
+                        panes.focus = panes.term.is_some_and(|(h, kind)| shells[h][kind as usize].is_some());
+                        continue;
+                    }
+                    // `v`: the dashboard and a terminal together, or not. A
+                    // split starts with the terminal last shown, or a shell
+                    // on the host in view.
+                    if k.code == KeyCode::Char('v') && k.modifiers.is_empty() && !hosts.is_empty() {
+                        if panes.split {
+                            panes.split = false;
+                            continue;
+                        }
+                        let term_now = panes.term.filter(|&(h, kind)| shells[h][kind as usize].is_some());
+                        let next =
+                            Panes { term: Some(term_now.unwrap_or((in_view, Kind::Shell))), split: true, focus: true };
+                        if term_now.is_none() {
+                            let size = term_size(&term, next)?;
+                            if let Err(e) = open_shell(
+                                &mut shells,
+                                &config,
+                                in_view,
+                                Kind::Shell,
+                                &control_dir,
+                                &mut next_shell,
+                                size,
+                                &wake_tx,
+                            ) {
+                                hosts[in_view].apply(crate::model::AgentMsg::Error(format!("terminal: {e}")));
+                                continue;
+                            }
+                        }
+                        panes = next;
                         continue;
                     }
                     if let Mode::Host { host, workload, window } = mode {
@@ -244,7 +333,10 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     if !(k.modifiers - KeyModifiers::ALT).is_empty() || hosts.is_empty() {
                         continue;
                     }
-                    let cols = cols(term.size()?.width, hosts.len());
+                    let size = term.size()?;
+                    let width =
+                        layout(Rect::new(0, 0, size.width, size.height), panes).0.map_or(size.width, |d| d.width);
+                    let cols = cols(width, hosts.len());
                     let n = hosts.len();
                     match k.code {
                         KeyCode::Left => selected = selected.saturating_sub(1),
@@ -268,7 +360,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                 dirty = true;
             }
         }
-        for s in shells.iter_mut().flatten() {
+        for s in shells.iter_mut().flatten().flatten() {
             dirty |= s.pane.tick(now);
         }
 
@@ -280,11 +372,12 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             dirty = true;
         }
         let mut read_changed = false;
+        let dashboard_shown = !(panes.term.is_some() && panes.focus && !panes.split);
         for (i, h) in hosts.iter_mut().enumerate() {
             h.check_reachable();
             // Alerts that just happened go to the desktop too, unless the
             // user is looking at that host already.
-            let looking = matches!(mode, Mode::Host { host, .. } if host == i);
+            let looking = dashboard_shown && matches!(mode, Mode::Host { host, .. } if host == i);
             for a in h.fresh.drain(..) {
                 if !looking {
                     notify(&h.name, &a.message);
@@ -303,30 +396,34 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             continue;
         }
         let drawn = term.draw(|f| {
-            let area = f.area();
-            match mode {
-                Mode::Overview => ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
-                    .draw(area, f.buffer_mut()),
-                Mode::Host { host, workload, window } => host::HostUi {
-                    theme: &theme,
-                    host: &hosts[host],
-                    selected: workload,
-                    own_bg: theme.own_palette,
-                    window,
-                }
-                .draw(area, f.buffer_mut()),
-                Mode::Shell { host } => {
-                    let Some(s) = shells[host].as_mut() else { return };
-                    let bar = Rect { height: 1.min(area.height), ..area };
-                    let body = Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area };
-                    let buf = f.buffer_mut();
-                    shell::draw_bar(buf, bar, &theme, &hosts[host].name, s);
-                    s.pane.draw(buf, body, &theme, !s.ended);
-                    if let Some(c) = s.pane.cursor().filter(|_| !s.ended) {
-                        if c.col < body.width && c.row < body.height {
-                            f.set_cursor_position((body.x + c.col, body.y + c.row));
-                        }
+            let (dash, pane) = layout(f.area(), panes);
+            if let Some(area) = dash {
+                match mode {
+                    Mode::Overview => {
+                        ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
+                            .draw(area, f.buffer_mut())
                     }
+                    Mode::Host { host, workload, window } => host::HostUi {
+                        theme: &theme,
+                        host: &hosts[host],
+                        selected: workload,
+                        own_bg: theme.own_palette,
+                        window,
+                    }
+                    .draw(area, f.buffer_mut()),
+                }
+            }
+            let (Some(area), Some((host, kind))) = (pane, panes.term) else { return };
+            let Some(s) = shells[host][kind as usize].as_mut() else { return };
+            let bar = Rect { height: 1.min(area.height), ..area };
+            let body = below_bar(area);
+            s.fit(body.width, body.height);
+            let buf = f.buffer_mut();
+            shell::draw_bar(buf, bar, &theme, &hosts[host].name, s, panes.focus);
+            s.pane.draw(buf, body, &theme, panes.focus && !s.ended);
+            if let Some(c) = s.pane.cursor().filter(|_| panes.focus && !s.ended) {
+                if c.col < body.width && c.row < body.height {
+                    f.set_cursor_position((body.x + c.col, body.y + c.row));
                 }
             }
         });
@@ -343,21 +440,39 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
     result
 }
 
-fn find_shell(shells: &mut [Option<shell::Shell>], id: u32) -> Option<(usize, &mut shell::Shell)> {
-    shells.iter_mut().enumerate().find_map(|(i, s)| s.as_mut().filter(|s| s.id == id).map(|s| (i, s)))
+fn find_shell(shells: &mut [[Option<shell::Shell>; 2]], id: u32) -> Option<((usize, Kind), &mut shell::Shell)> {
+    shells
+        .iter_mut()
+        .enumerate()
+        .find_map(|(i, pair)| pair.iter_mut().flatten().find(|s| s.id == id).map(|s| ((i, s.kind), s)))
 }
 
-/// A terminal on `host` the size of the screen below the bar.
+/// The size, columns by rows, of the terminal that `panes` puts on screen.
+fn term_size(term: &Terminal<CrosstermBackend<std::io::Stdout>>, panes: Panes) -> anyhow::Result<(u16, u16)> {
+    let size = term.size()?;
+    let area = layout(Rect::new(0, 0, size.width, size.height), panes)
+        .1
+        .map_or(Rect::new(0, 0, size.width, size.height), below_bar);
+    Ok((area.width, area.height))
+}
+
+/// Starts a terminal of `kind` on host `host`, in place of any it had.
+#[allow(clippy::too_many_arguments)]
 fn open_shell(
-    host: &crate::config::Host,
+    shells: &mut [[Option<shell::Shell>; 2]],
+    config: &Config,
+    host: usize,
+    kind: Kind,
     control_dir: &Path,
     next: &mut u32,
-    term: &Terminal<CrosstermBackend<std::io::Stdout>>,
+    size: (u16, u16),
     tx: &mpsc::SyncSender<Wake>,
-) -> anyhow::Result<shell::Shell> {
-    let size = term.size()?;
+) -> anyhow::Result<()> {
+    let slot = &mut shells[host][kind as usize];
+    *slot = None;
     *next += 1;
-    shell::open(host, control_dir, *next, size.width, size.height.saturating_sub(1), tx.clone())
+    *slot = Some(shell::open(&config.hosts[host], kind, control_dir, *next, size, tx.clone())?);
+    Ok(())
 }
 
 /// A desktop notification, when the desktop has a way to show one. The
@@ -658,6 +773,28 @@ mod tests {
             ..Default::default()
         }));
         render(&[v], 120, 30);
+    }
+
+    #[test]
+    fn a_split_shares_the_screen_and_a_terminal_alone_takes_it() {
+        use super::{layout, Panes, SIDE_BY_SIDE};
+        use crate::viewer::shell::Kind;
+        let term = Some((0, Kind::Shell));
+        let wide = Rect::new(0, 0, SIDE_BY_SIDE, 50);
+        let (d, t) = layout(wide, Panes { term, split: true, focus: false });
+        let (d, t) = (d.unwrap(), t.unwrap());
+        assert_eq!((d.x, d.width + t.width, t.x), (0, SIDE_BY_SIDE, d.width), "side by side");
+        assert_eq!((d.height, t.height), (50, 50));
+        let narrow = Rect::new(0, 0, 100, 41);
+        let (d, t) = layout(narrow, Panes { term, split: true, focus: true });
+        let (d, t) = (d.unwrap(), t.unwrap());
+        assert_eq!((d.height + t.height, t.y, t.width), (41, d.height, 100), "one above the other");
+        assert_eq!(layout(narrow, Panes { term, split: false, focus: true }), (None, Some(narrow)));
+        assert_eq!(layout(narrow, Panes { term, split: false, focus: false }), (Some(narrow), None));
+        assert_eq!(layout(narrow, Panes { term: None, split: true, focus: true }), (Some(narrow), None));
+        // The dashboard draws in either half without trouble.
+        let hosts = vec![host("gpu-box", vec![nvidia()], State::Live), host("apu-box", vec![apu()], State::Live)];
+        render(&hosts, SIDE_BY_SIDE / 2, 20);
     }
 
     #[test]

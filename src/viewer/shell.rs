@@ -1,9 +1,10 @@
 //! Terminals: a shell on a host, in a pane of nerdmux's terminal engine.
 //!
-//! The shell runs inside `nerdmux attach --plain`, so it outlives the
+//! A shell runs inside `nerdmux attach --plain`, so it outlives the
 //! connection and the viewer: the next terminal on that host attaches to the
 //! same session. A host without a nerdmux that knows `--plain` gets a plain
-//! login shell instead, and the pane says it will not survive.
+//! login shell instead, and the pane says it will not survive. The other
+//! kind of terminal is the host's own nerdmux, status bar, keys and all.
 
 use crate::config::{Access, Host};
 use crate::remote::Ssh;
@@ -31,31 +32,54 @@ const SHELL_SCRIPT: &str = "for n in nerdmux \"$HOME/.local/bin/nerdmux\" \"$HOM
     echo \"nerdfleet: no nerdmux with --plain on this host, so this shell ends with the connection.\"; \
     exec \"${SHELL:-/bin/sh}\" -l";
 
+/// Which program a terminal runs on the host.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    /// A shell in the fleet session, kept alive by `nerdmux attach --plain`.
+    Shell = 0,
+    /// The host's nerdmux as the user knows it: their last session, or a new one.
+    Nerdmux = 1,
+}
+
+/// What `Kind::Nerdmux` runs on a host: the first nerdmux found, through a
+/// login shell, as `SHELL_SCRIPT` finds it; or else a login shell.
+const NERDMUX_SCRIPT: &str = "for n in nerdmux \"$HOME/.local/bin/nerdmux\" \"$HOME/.cargo/bin/nerdmux\"; do \
+    m=\"$(command -v \"$n\" 2>/dev/null)\" || continue; \
+    printf %s \"$m\" | grep -q \"[^A-Za-z0-9/._-]\" && continue; \
+    exec \"${SHELL:-/bin/sh}\" -l -c \"exec $m\"; done; \
+    echo \"nerdfleet: no nerdmux on this host, so this is a plain login shell.\"; \
+    exec \"${SHELL:-/bin/sh}\" -l";
+
 pub struct Shell {
     /// Tells this pane's events from those of the one it replaced.
     pub id: u32,
+    pub kind: Kind,
     pub pane: Terminal,
+    /// The pane's size, columns by rows, as last given to the program.
+    pub size: (u16, u16),
     /// The program ended, or the connection dropped.
     pub ended: bool,
 }
 
-/// Starts a terminal on `host`, `cols` by `rows`.
+/// Starts a terminal of `kind` on `host`, `cols` by `rows`.
 pub fn open<E: From<TerminalEvent> + Send + 'static>(
     host: &Host,
+    kind: Kind,
     control_dir: &Path,
     id: u32,
-    cols: u16,
-    rows: u16,
+    (cols, rows): (u16, u16),
     tx: SyncSender<E>,
 ) -> anyhow::Result<Shell> {
-    let command = match &host.access {
-        Access::Ssh(alias) => Ssh::new(alias, control_dir)?.terminal(SHELL_SCRIPT),
-        Access::Local => local_command(),
+    let command = match (&host.access, kind) {
+        (Access::Ssh(alias), Kind::Shell) => Ssh::new(alias, control_dir)?.terminal(SHELL_SCRIPT),
+        (Access::Ssh(alias), Kind::Nerdmux) => Ssh::new(alias, control_dir)?.terminal(NERDMUX_SCRIPT),
+        (Access::Local, Kind::Shell) => local_command(),
+        (Access::Local, Kind::Nerdmux) => local_nerdmux_command()?,
     };
     let env = environment();
     let cwd = std::env::var_os("HOME").map(Into::into);
     let pane = Terminal::spawn(id, Options { cols, rows, command, cwd, env: &env }, tx)?;
-    Ok(Shell { id, pane, ended: false })
+    Ok(Shell { id, kind, pane, size: (cols, rows), ended: false })
 }
 
 impl Shell {
@@ -69,14 +93,23 @@ impl Shell {
         }
     }
 
+    /// Gives the program a new size, if it is one.
+    pub fn fit(&mut self, cols: u16, rows: u16) {
+        if self.size != (cols, rows) {
+            self.size = (cols, rows);
+            self.pane.resize(cols, rows);
+        }
+    }
+
     /// The title the program set, safe to draw.
     pub fn title(&self) -> String {
         crate::text::clean(self.pane.title()).chars().take(80).collect()
     }
 }
 
-/// The bar above a terminal: whose shell it is, and the way back.
-pub fn draw_bar(buf: &mut Buffer, area: Rect, theme: &Theme, host: &str, shell: &Shell) {
+/// The bar above a terminal: whose shell it is, and the way back. A
+/// terminal beside the dashboard without the focus says how to get it.
+pub fn draw_bar(buf: &mut Buffer, area: Rect, theme: &Theme, host: &str, shell: &Shell, focused: bool) {
     use ratatui::text::{Line, Span};
     use ratatui::widgets::Widget;
     let t = theme;
@@ -85,6 +118,9 @@ pub fn draw_bar(buf: &mut Buffer, area: Rect, theme: &Theme, host: &str, shell: 
         Span::styled(" nërdfleet ", Style::default().bg(t.accent).fg(t.accent_fg).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" › {} ", crate::text::clean(host)), Style::default().add_modifier(Modifier::BOLD)),
     ];
+    if shell.kind == Kind::Nerdmux {
+        left.push(Span::styled(" nerdmux ", Style::default().fg(t.dim)));
+    }
     let title = shell.title();
     if !title.is_empty() {
         left.push(Span::styled(format!(" {title} "), Style::default().fg(t.dim)));
@@ -93,7 +129,11 @@ pub fn draw_bar(buf: &mut Buffer, area: Rect, theme: &Theme, host: &str, shell: 
         left.push(Span::styled(" ended ", Style::default().fg(t.red).add_modifier(Modifier::BOLD)));
     }
     Line::from(left).render(area, buf);
-    let keys = if shell.ended { "Enter reconnect  Ctrl+] dashboard " } else { "Ctrl+] dashboard " };
+    let keys = match (focused, shell.ended) {
+        (false, _) => "Ctrl+] here ",
+        (true, true) => "Enter reconnect  Ctrl+] dashboard ",
+        (true, false) => "Ctrl+] dashboard ",
+    };
     let kw = keys.chars().count() as u16;
     if area.width > kw + 20 {
         Span::styled(keys, Style::default().fg(t.dim))
@@ -122,13 +162,25 @@ fn environment() -> Vec<(String, String)> {
 
 /// On this machine: nerdmux if it knows `--plain`, or the user's shell.
 fn local_command() -> Vec<String> {
-    match local_nerdmux() {
+    match local_nerdmux(true) {
         Some(m) => vec![m, "attach".into(), "--plain".into(), "-t".into(), SESSION.into()],
         None => vec![std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())],
     }
 }
 
-fn local_nerdmux() -> Option<String> {
+/// This machine's nerdmux, as the user knows it. Not from inside a
+/// nerdmux: attaching to the session that shows the viewer would draw the
+/// viewer inside itself.
+fn local_nerdmux_command() -> anyhow::Result<Vec<String>> {
+    if std::env::var_os("NERDMUX").is_some_and(|v| !v.is_empty()) {
+        anyhow::bail!("nerdfleet already runs inside nerdmux on this machine");
+    }
+    Ok(vec![local_nerdmux(false).ok_or_else(|| anyhow::anyhow!("no nerdmux on this machine"))?])
+}
+
+/// The first nerdmux on PATH, in `~/.local/bin` or in `~/.cargo/bin`;
+/// with `plain`, the first that knows `--plain`.
+fn local_nerdmux(plain: bool) -> Option<String> {
     use std::process::{Command, Stdio};
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let mut candidates: Vec<std::path::PathBuf> = std::env::var_os("PATH")
@@ -139,6 +191,9 @@ fn local_nerdmux() -> Option<String> {
         candidates.push(home.join(".cargo/bin/nerdmux"));
     }
     candidates.into_iter().filter(|c| c.is_file()).find_map(|c| {
+        if !plain {
+            return Some(c.to_string_lossy().into_owned());
+        }
         let out = Command::new(&c).arg("--help").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
         String::from_utf8_lossy(&out.stdout).contains("--plain").then(|| c.to_string_lossy().into_owned())
     })
@@ -165,6 +220,12 @@ mod tests {
     }
 
     #[test]
+    fn the_nerdmux_script_is_fixed_too_and_wants_no_plain() {
+        assert!(!NERDMUX_SCRIPT.contains('\'') && !NERDMUX_SCRIPT.contains('!') && !NERDMUX_SCRIPT.contains('\\'));
+        assert!(!NERDMUX_SCRIPT.contains("--plain") && !NERDMUX_SCRIPT.contains("attach"));
+    }
+
+    #[test]
     fn ctrl_bracket_leaves_in_both_spellings() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         assert!(is_escape(&KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL)));
@@ -173,12 +234,12 @@ mod tests {
         assert!(!is_escape(&KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL | KeyModifiers::ALT)));
     }
 
-    /// Runs the script under `shell` with `HOME` set to `home` and a PATH
+    /// Runs `script` under `shell` with `HOME` set to `home` and a PATH
     /// without nerdmux, and returns what it printed.
-    fn run_script(shell: &str, home: &Path) -> String {
+    fn run_script(shell: &str, script: &str, home: &Path) -> String {
         let out = std::process::Command::new(shell)
             .arg("-c")
-            .arg(SHELL_SCRIPT)
+            .arg(script)
             .env_clear()
             .env("HOME", home)
             .env("PATH", "/usr/bin:/bin")
@@ -207,8 +268,10 @@ mod tests {
             if std::process::Command::new(shell).arg("-c").arg("true").output().is_err() {
                 continue;
             }
-            let text = run_script(shell, &home);
+            let text = run_script(shell, SHELL_SCRIPT, &home);
             assert!(text.contains("ran attach --plain -t fleet"), "{shell}: {text}");
+            let text = run_script(shell, NERDMUX_SCRIPT, &home);
+            assert!(text.trim_end().ends_with("ran"), "{shell}: nerdmux with no arguments: {text}");
         }
         let _ = std::fs::remove_dir_all(&home);
     }

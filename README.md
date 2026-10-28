@@ -64,9 +64,15 @@ Colors come from `~/.config/nerd-theme.toml`, the theme the Nërd tools share; s
 [nerdmux](https://github.com/Ndles/nerdmux#configuration) for what it can set.
 
 Arrows (or `Alt+arrows`, as in nerdmux) move between hosts, `Enter` opens one, `Esc` goes back, and `q` or `Ctrl+C`
-quits. `s` opens a shell on the host, full screen; `Ctrl+]` goes back to the dashboard and `s` returns to it. With
-[nerdmux](../nerdmux) on the host the shell lives in a nerdmux session, so it survives a dropped connection and the
-next `s` picks it up; without it, you get a plain login shell, and the terminal says so.
+quits. `s` opens a shell on the host, full screen; `Ctrl+]` goes back to the dashboard and `s` (or `Ctrl+]` again)
+returns to it. With [nerdmux](../nerdmux) on the host the shell lives in a nerdmux session, so it survives a dropped
+connection and the next `s` picks it up; without it, you get a plain login shell, and the terminal says so. `S` opens
+the host's own nerdmux instead, status bar, windows and keys included, attached to your last session there. `v` puts
+the dashboard and the terminal side by side (one above the other on narrower screens); `Ctrl+]` moves the keys between
+them, and `v` again gives the dashboard the whole screen.
+
+If nerdfleet itself runs inside nerdmux, that nerdmux keeps its own keys (`Alt+Space`, `Alt+arrows`), so with `S` you
+press the leader twice to reach the remote one. `S` on the machine nerdfleet runs on works only outside nerdmux.
 
 Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
 (`CPU`), named the way you would name them (`torchrun train.py`, `llama-swap · Qwen3-8B-Q4_K_M`). The host view adds
