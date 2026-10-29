@@ -25,12 +25,14 @@ watches Linux hosts). Each one includes the agents for x86_64 and aarch64 Linux,
 reaches RHEL 8-era machines and ARM boxes too.
 
 ```sh
-gh release download v0.2.0 -R Ndles/nerdfleet -p 'nerdfleet-0.2.0-x86_64-linux*'
-sha256sum -c nerdfleet-0.2.0-x86_64-linux.sha256
-install -m 755 nerdfleet-0.2.0-x86_64-linux ~/.local/bin/nerdfleet
+f=nerdfleet-0.2.0-x86_64-linux     # or -aarch64-linux, -aarch64-macos
+curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.0/$f
+curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.0/$f.sha256
+sha256sum -c $f.sha256
+install -m 755 $f ~/.local/bin/nerdfleet
 ```
 
-On a Mac, check it with `shasum -a 256 -c` instead, and fetch it with `gh` or `curl`: a copy downloaded in a browser
+On a Mac, check it with `shasum -a 256 -c` instead, and fetch it with `curl` as above: a copy downloaded in a browser
 is quarantined by Gatekeeper. The Mac viewer is built and tested in CI, but nobody has run it on a Mac yet; if you do,
 an issue saying how it went, good or bad, helps.
 
@@ -138,7 +140,7 @@ would run. Run `enable` again after updating nerdfleet to update the agent.
 - **It gives up politely.** A host that goes away is tried 8 times over about three minutes, and its card says which
   try is next; then nerdfleet waits for `r`. A refused key or an unknown host key is not retried at all.
 
-See [Security](docs/design.md#security) in the design for the full list.
+To report a security problem, see [SECURITY.md](SECURITY.md).
 
 ## Things worth knowing
 
@@ -153,8 +155,7 @@ See [Security](docs/design.md#security) in the design for the full list.
 ## Status
 
 Working: live hosts and what they run, the host view with 24 hours of history, resident agents with alerts, and
-terminals ([phases 1 to 4](docs/design.md#phases) of the design). Next: Slurm clusters (relay, job steps, a cluster
-view), and Macs as hosts. The macOS viewer is built and released but not yet tried on a Mac.
+terminals. Next: Slurm clusters (relay, job steps, a cluster view), and Macs as hosts. The macOS viewer is built and released but not yet tried on a Mac.
 
 ## License
 
