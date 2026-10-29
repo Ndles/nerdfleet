@@ -49,13 +49,14 @@ machine it was built on. `scripts/release.sh` builds the agents the releases car
 [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild). With [just](https://github.com/casey/just), `just`
 lists the common tasks, and `just fleet` opens nerdfleet in a window of your nerdmux session.
 
-To work on nerdmux and nerdfleet together, keep the checkouts side by side and build nerdfleet against yours with a
-`.cargo/config.toml` in the directory above them:
+To try a nerdmux change in nerdfleet before it is pushed, build against a checkout next to this one:
 
-```toml
-[patch."https://github.com/Ndles/nerdmux"]
-nerdmux = { path = "nerdmux" }
+```sh
+cargo build --config 'patch."https://github.com/Ndles/nerdmux".nerdmux.path="../nerdmux"'
 ```
+
+That points `Cargo.lock` at the checkout, so put it back (`git checkout Cargo.lock`) rather than commit it. To ship
+the change, push nerdmux, set its new commit as `rev` in `Cargo.toml` and run `cargo update -p nerdmux`.
 
 Releases are built on GitHub: a tag `vX.Y.Z` that matches `Cargo.toml` runs the tests, builds the three viewers and
 publishes them; "Run workflow" builds them without publishing.

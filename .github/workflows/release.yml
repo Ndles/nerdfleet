@@ -7,9 +7,8 @@
 # attached to the run:
 #   gh run download --repo Ndles/nerdfleet -n nerdfleet-linux -n nerdfleet-macos
 #
-# nerdmux is private: it is checked out next to nerdfleet, at the commit
-# Cargo.toml pins, with a read-only deploy key kept in the secret
-# NERDMUX_DEPLOY_KEY, and patched in the way it is on a developer's machine.
+# nerdmux is fetched by Cargo from GitHub, at the commit Cargo.toml pins
+# and Cargo.lock records.
 
 name: release
 
@@ -35,23 +34,6 @@ jobs:
         with:
           path: nerdfleet
           persist-credentials: false
-      - name: The nerdmux commit Cargo.toml pins
-        id: pin
-        run: |
-          rev=$(sed -n 's/^nerdmux = { git = .*rev = "\([0-9a-f]*\)".*/\1/p' nerdfleet/Cargo.toml)
-          test -n "$rev"
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v7
-        with:
-          repository: Ndles/nerdmux
-          ref: ${{ steps.pin.outputs.rev }}
-          path: nerdmux
-          ssh-key: ${{ secrets.NERDMUX_DEPLOY_KEY }}
-          persist-credentials: false
-      - name: Build against that checkout
-        run: |
-          mkdir -p .cargo
-          printf '[patch."https://github.com/Ndles/nerdmux"]\nnerdmux = { path = "nerdmux" }\n' > .cargo/config.toml
       - name: The tag names the version being built
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -102,23 +84,6 @@ jobs:
         with:
           path: nerdfleet
           persist-credentials: false
-      - name: The nerdmux commit Cargo.toml pins
-        id: pin
-        run: |
-          rev=$(sed -n 's/^nerdmux = { git = .*rev = "\([0-9a-f]*\)".*/\1/p' nerdfleet/Cargo.toml)
-          test -n "$rev"
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v7
-        with:
-          repository: Ndles/nerdmux
-          ref: ${{ steps.pin.outputs.rev }}
-          path: nerdmux
-          ssh-key: ${{ secrets.NERDMUX_DEPLOY_KEY }}
-          persist-credentials: false
-      - name: Build against that checkout
-        run: |
-          mkdir -p .cargo
-          printf '[patch."https://github.com/Ndles/nerdmux"]\nnerdmux = { path = "nerdmux" }\n' > .cargo/config.toml
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

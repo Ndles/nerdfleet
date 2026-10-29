@@ -4,8 +4,7 @@
 # needs glibc 2.28 at most, so it runs on old cluster nodes as well as
 # current distributions.
 #
-#   scripts/release.sh              # needs Docker, zig, cargo-zigbuild, and nerdmux next to this repo
-#   NERDMUX_DIR=/path/to/nerdmux scripts/release.sh
+#   scripts/release.sh              # needs Docker, zig and cargo-zigbuild
 #
 # Two stages, because the agent is the same program as the viewer:
 #   1. agents: plain builds for each target, in target/agents/<version>/;
@@ -13,26 +12,13 @@
 # x86_64 builds in a Rocky Linux 8 container with a pinned toolchain;
 # aarch64 cross-builds with cargo-zigbuild against glibc 2.28.
 #
-# nerdmux is built from that checkout, which must be at the commit
-# Cargo.toml pins, so no build needs network or access to the private
-# repository.
+# nerdmux comes from GitHub at the commit Cargo.toml pins and Cargo.lock
+# records; every build is --locked.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-nerdmux=$(cd "${NERDMUX_DIR:-$root/../nerdmux}" && pwd)
 image=nerdfleet-build:rocky8
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
-url=$(sed -n 's/^nerdmux = { git = "\([^"]*\)".*/\1/p' "$root/Cargo.toml")
-rev=$(sed -n 's/^nerdmux = { git = .*rev = "\([0-9a-f]*\)".*/\1/p' "$root/Cargo.toml")
-if [ -z "$url" ] || [ -z "$rev" ]; then
-    echo "release: no nerdmux git dependency with a rev in Cargo.toml" >&2
-    exit 1
-fi
-have=$(git -C "$nerdmux" rev-parse HEAD)
-if [ "$have" != "$rev" ] || [ -n "$(git -C "$nerdmux" status --porcelain --untracked-files=no)" ]; then
-    echo "release: $nerdmux must be at $rev, the commit Cargo.toml pins, with no changes (it is at $have)" >&2
-    exit 1
-fi
 for tool in docker zig cargo-zigbuild readelf; do
     command -v "$tool" >/dev/null || { echo "release: $tool is needed" >&2; exit 1; }
 done
@@ -44,8 +30,8 @@ docker build -q -t "$image" -f "$root/build/rocky8.Dockerfile" "$root/build" >/d
 mkdir -p "$root/target/rocky8/cargo-home" "$root/dist"
 
 # x86_64 in the container, as the calling user, so nothing in the tree ends
-# up owned by root. The nerdmux checkout is mounted read-only. $1 is the
-# agents directory to build in, as seen inside, or empty for none.
+# up owned by root. $1 is the agents directory to build in, as seen inside,
+# or empty for none.
 build_x86_64() {
     docker run --rm \
         --user "$(id -u):$(id -g)" \
@@ -54,18 +40,15 @@ build_x86_64() {
         -e CARGO_TARGET_DIR=/src/nerdfleet/target/rocky8 \
         -e NERDFLEET_AGENTS="$1" \
         -v "$root:/src/nerdfleet" \
-        -v "$nerdmux:/src/nerdmux:ro" \
         -w /src/nerdfleet \
-        "$image" cargo build --release --locked \
-            --config "patch.\"$url\".nerdmux.path=\"/src/nerdmux\"" >&2 &&
+        "$image" cargo build --release --locked >&2 &&
         echo "$root/target/rocky8/release/nerdfleet"
 }
 
 # aarch64 here, with zig as the linker. $1 as above.
 build_aarch64() {
     (cd "$root" && NERDFLEET_AGENTS="$1" cargo zigbuild --release --locked --quiet \
-        --target aarch64-unknown-linux-gnu.2.28 \
-        --config "patch.\"$url\".nerdmux.path=\"$nerdmux\"" >&2) &&
+        --target aarch64-unknown-linux-gnu.2.28 >&2) &&
         echo "$root/target/aarch64-unknown-linux-gnu/release/nerdfleet"
 }
 
