@@ -5,12 +5,12 @@ authors = ["Pavel Kuksa"]
 edition = "2021"
 description = "Watch a fleet of machines from one terminal: GPUs, CPUs, memory and the training and inference running on them"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [dependencies]
-nerdmux = { git = "https://github.com/Ndles/nerdmux", rev = "620a43ccfeb1c2adbf49d79ea7301e7c4f539d39" }
-ratatui = { version = "0.29", default-features = false, features = ["crossterm", "underline-color"] }
-crossterm = "0.28"
+nerdmux = { git = "https://github.com/Ndles/nerdmux", rev = "aa4787076d98eec14d881b46de21de3a18da31f1" }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "underline-color"] }
+crossterm = "0.29"
 serde = { version = "1", features = ["derive"] }
 toml_edit = { version = "0.22", features = ["serde"] }
 libc = "0.2"
