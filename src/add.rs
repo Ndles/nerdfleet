@@ -9,6 +9,16 @@ use std::io::{IsTerminal, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+const USAGE: &str = "\
+nerdfleet add - add hosts from ~/.ssh/config to the fleet
+
+USAGE
+  nerdfleet add               pick them from a list
+  nerdfleet add ALIAS...      add the ones named
+
+Hosts are added to the end of the config file, and what is in it already
+stays as it is.";
+
 /// As deep as OpenSSH follows `Include`.
 const MAX_INCLUDES: u32 = 16;
 
@@ -155,6 +165,14 @@ fn listed(config: &Config, alias: &str) -> bool {
 
 /// `nerdfleet add [ALIAS...]`: the named hosts, or those picked from a list.
 pub fn run(args: &[&str], config_path: &Path, ssh_config: &Path, home: &Path) -> anyhow::Result<()> {
+    if args.iter().any(|a| matches!(*a, "-h" | "--help")) {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    // No alias starts with a dash (`check_alias`).
+    if let Some(option) = args.iter().find(|a| a.starts_with('-')) {
+        anyhow::bail!("unknown option {option}\nTry `nerdfleet add --help`.");
+    }
     let config = Config::load(config_path)?;
     let found = aliases(ssh_config, home);
     let chosen: Vec<String> = if args.is_empty() {
@@ -278,6 +296,23 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         write_config(&dir.join("config.toml"), "# new\n").unwrap();
         assert!(Config::load(&dir.join("config.toml")).is_ok());
+    }
+
+    #[test]
+    fn options_are_not_taken_for_aliases() {
+        let d = scratch("options");
+        let ssh = d.join("ssh_config");
+        std::fs::write(&ssh, "Host gpu-box\n").unwrap();
+        let conf = d.join("conf/config.toml");
+        // Help is there even with nothing else in order, and adds nothing.
+        std::fs::create_dir_all(d.join("conf")).unwrap();
+        std::fs::write(&conf, "not a config").unwrap();
+        for help in [&["--help"][..], &["-h"], &["gpu-box", "--help"]] {
+            run(help, &conf, &ssh, &d).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "not a config");
+        let err = run(&["--force"], &conf, &ssh, &d).unwrap_err().to_string();
+        assert!(err.starts_with("unknown option --force"), "{err}");
     }
 
     #[test]
