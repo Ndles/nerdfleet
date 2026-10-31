@@ -8,6 +8,10 @@
 
 <p align="center">Linux · macOS viewer (untested) · <a href="LICENSE">MIT license</a></p>
 
+![nerdfleet: a fleet at a glance, a host's graphs and workloads, a terminal beside them, and an alert for a stalled run](docs/demo/nerdfleet.gif)
+
+<p align="center"><sub>The hosts in this recording are simulated; <a href="docs/demo/README.md">how it is made</a>.</sub></p>
+
 Watch a fleet of machines from one terminal: what each one is training or serving, how hard its CPUs, memory and
 GPUs are working, and a terminal on any of them a keystroke away. For AI/ML engineers and researchers whose work is
 spread over GPU boxes, model servers and workstations.
