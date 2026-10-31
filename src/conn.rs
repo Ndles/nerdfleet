@@ -40,6 +40,8 @@ pub enum Retry {
 pub enum Event {
     State(usize, State),
     Agent(usize, AgentMsg),
+    /// Updating the resident agent ended, with what went wrong if anything.
+    Updated(usize, Option<String>),
 }
 
 /// What every host thread shares.
@@ -81,6 +83,14 @@ impl Shared {
     fn subscribe(&self, index: usize) -> Frame<ViewerMsg> {
         let detail = self.detail[index].load(Ordering::SeqCst);
         Frame { route: Vec::new(), msg: ViewerMsg::Subscribe { interval_ms: self.interval_ms, detail } }
+    }
+
+    /// Drops host `index`'s connection, which then starts over.
+    fn reconnect(&self, index: usize) {
+        if let Some(pid) = self.children.lock().unwrap()[index] {
+            // SAFETY: signalling a child we started; at worst it is gone.
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        }
     }
 
     /// Asks host `index` for detail, or to stop sending it.
@@ -153,6 +163,20 @@ pub fn spawn(index: usize, host: Host, shared: Arc<Shared>, tx: Sender<Event>) {
                 failed = 0;
             }
         }
+    });
+}
+
+/// Replaces the resident agent on `host` with this viewer's, in the
+/// background: it takes SSH and a service restart. Then the connection
+/// starts over, to find the new agent; the old one may still be connected.
+pub fn update_resident(index: usize, host: Host, shared: Arc<Shared>, tx: Sender<Event>) {
+    std::thread::spawn(move || {
+        let result = crate::resident_ctl::install(&host, &shared.control_dir, &shared.agents, || {});
+        let failed = result.err().map(|e| format!("{e:#}"));
+        if failed.is_none() {
+            shared.reconnect(index);
+        }
+        let _ = tx.send(Event::Updated(index, failed));
     });
 }
 

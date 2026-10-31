@@ -1,12 +1,14 @@
 //! nerdfleet: the viewer, and the agent it starts on each host.
 
-use nerdfleet::{agent, config, paths, resident_ctl, viewer};
+use nerdfleet::{add, agent, config, paths, resident_ctl, viewer};
 
 const USAGE: &str = "\
 nerdfleet - watch a fleet of machines from one terminal
 
 USAGE
   nerdfleet                   open the overview of every host in the config
+  nerdfleet add [ALIAS...]    add hosts from ~/.ssh/config to the config: the
+                              ones named, or those you pick from a list
   nerdfleet config            print an example config file
   nerdfleet config --path     print where the config file lives
   nerdfleet check             check the config file and say what is wrong
@@ -41,6 +43,9 @@ fn main() {
         ["resident", "disable", name] => with_host(name, |h, dir| resident_ctl::disable(h, dir, false)),
         ["resident", "disable", name, "--purge"] => with_host(name, |h, dir| resident_ctl::disable(h, dir, true)),
         ["resident", "status", name] => with_host(name, resident_ctl::status),
+        ["add", ref aliases @ ..] => {
+            add::run(aliases, &paths::config_path(), &paths::ssh_config_path(), &paths::home())
+        }
         ["config"] => {
             print!("{}", config::TEMPLATE);
             Ok(())
@@ -99,7 +104,10 @@ fn check() -> anyhow::Result<()> {
     let path = paths::config_path();
     let c = config::Config::load(&path)?;
     if !path.exists() {
-        println!("{} does not exist yet: the fleet is empty. `nerdfleet config` prints an example.", path.display());
+        println!(
+            "{} does not exist yet: the fleet is empty. `nerdfleet add` picks hosts from ~/.ssh/config.",
+            path.display()
+        );
         return Ok(());
     }
     println!("{}: {} host(s), sampling every {} ms", path.display(), c.hosts.len(), c.interval_ms);

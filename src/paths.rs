@@ -8,7 +8,7 @@ fn uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
-fn home() -> PathBuf {
+pub fn home() -> PathBuf {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
@@ -26,6 +26,11 @@ pub fn config_dir() -> PathBuf {
 
 pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
+}
+
+/// The user's SSH config, which names the hosts `nerdfleet add` offers.
+pub fn ssh_config_path() -> PathBuf {
+    home().join(".ssh/config")
 }
 
 /// What a resident agent remembers between runs.

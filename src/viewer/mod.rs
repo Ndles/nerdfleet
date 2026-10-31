@@ -2,6 +2,7 @@
 
 mod app;
 mod host;
+mod pick;
 mod shell;
 mod ui;
 
@@ -9,7 +10,8 @@ use crate::config::Config;
 use crate::conn::{self, Event, Shared};
 use crate::remote::Agents;
 use app::HostView;
-use crossterm::event::{self as term, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self as term, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::style::Print;
 use crossterm::{execute, terminal};
 use nerdmux::embed::TerminalEvent;
 use nerdmux::embed::Theme;
@@ -21,6 +23,8 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+pub use pick::pick;
 
 /// What the dashboard shows.
 #[derive(Clone, Copy, PartialEq)]
@@ -126,6 +130,42 @@ fn below_bar(r: Rect) -> Rect {
     Rect { y: r.y + 1.min(r.height), height: r.height.saturating_sub(1), ..r }
 }
 
+/// What is under the mouse.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Part {
+    Dashboard,
+    /// The terminal's bar.
+    Bar,
+    /// The terminal, at this column and row of it.
+    Terminal(u16, u16),
+}
+
+/// The part of the screen at `(x, y)`, by the rectangles it is drawn in. The
+/// ring and the separator around them are no part.
+fn part_at(area: Rect, panes: Panes, x: u16, y: u16) -> Option<Part> {
+    let inside = |r: Rect| r.contains(ratatui::layout::Position { x, y });
+    let (dash, term) = layout(area, panes);
+    if let Some(term) = term.filter(|t| inside(*t)) {
+        let body = below_bar(term);
+        return Some(if inside(body) { Part::Terminal(x - body.x, y - body.y) } else { Part::Bar });
+    }
+    dash.filter(|d| inside(*d)).map(|_| Part::Dashboard)
+}
+
+/// Where in the terminal a drag or a release that began in it lands, however
+/// far outside it the pointer has gone.
+fn held_at(area: Rect, panes: Panes, x: u16, y: u16) -> Option<(u16, u16)> {
+    let body = below_bar(layout(area, panes).1?);
+    let last = |start: u16, len: u16| start + len.saturating_sub(1);
+    Some((x.clamp(body.x, last(body.x, body.width)) - body.x, y.clamp(body.y, last(body.y, body.height)) - body.y))
+}
+
+/// Mouse reports for clicks, drags and the wheel, in the form that has no
+/// limit on the screen's size. Not `EnableMouseCapture`: it also asks for
+/// every pointer move, which nothing here wants.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1002l\x1b[?1000l\x1b[?1006l";
+
 /// Puts the terminal back however the viewer ends, panics included.
 struct Screen;
 
@@ -136,7 +176,8 @@ impl Screen {
             std::io::stdout(),
             terminal::EnterAlternateScreen,
             crossterm::cursor::Hide,
-            crossterm::event::EnableBracketedPaste
+            crossterm::event::EnableBracketedPaste,
+            Print(MOUSE_ON)
         )?;
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -149,6 +190,7 @@ impl Screen {
     fn restore() {
         let _ = execute!(
             std::io::stdout(),
+            Print(MOUSE_OFF),
             crossterm::event::DisableBracketedPaste,
             terminal::LeaveAlternateScreen,
             crossterm::cursor::Show
@@ -223,6 +265,8 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
     let mut panes = Panes::default();
     let mut selected = 0usize;
     let mut scroll = 0u16;
+    // A mouse button went down in the terminal, which gets the rest of it.
+    let mut held = false;
     let mut dirty = true;
     let mut last_draw = Instant::now();
     let mut mode = Mode::Overview;
@@ -258,6 +302,62 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     if let Some(s) = panes.term.filter(|_| panes.focus).and_then(|h| shells[h].as_mut()) {
                         s.pane.paste(&text);
                     }
+                }
+                Wake::Input(TermEvent::Mouse(m)) => {
+                    let size = term.size()?;
+                    let area = Rect::new(0, 0, size.width, size.height);
+                    let shown = panes.term.and_then(|h| shells[h].as_mut());
+                    if matches!(m.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_)) {
+                        if let (true, Some(s), Some((col, row))) = (held, shown, held_at(area, panes, m.column, m.row))
+                        {
+                            s.pane.mouse(m, col, row);
+                        }
+                        held &= !matches!(m.kind, MouseEventKind::Up(_));
+                        continue;
+                    }
+                    let part = part_at(area, panes, m.column, m.row);
+                    match (m.kind, part, shown) {
+                        // A click puts the keys where it landed, and goes to
+                        // the program too, as a click on a pane of nerdmux does.
+                        (MouseEventKind::Down(_), Some(Part::Dashboard), _) => panes.focus = false,
+                        (MouseEventKind::Down(_), Some(Part::Bar), Some(_)) => panes.focus = true,
+                        (MouseEventKind::Down(_), Some(Part::Terminal(col, row)), Some(s)) => {
+                            panes.focus = true;
+                            s.pane.mouse(m, col, row);
+                            held = true;
+                        }
+                        // The wheel works wherever the pointer is, without
+                        // moving the keys.
+                        (
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown,
+                            Some(Part::Terminal(col, row)),
+                            Some(s),
+                        ) => {
+                            s.pane.mouse(m, col, row);
+                        }
+                        (MouseEventKind::ScrollUp | MouseEventKind::ScrollDown, Some(Part::Dashboard), _)
+                            if !hosts.is_empty() =>
+                        {
+                            let up = m.kind == MouseEventKind::ScrollUp;
+                            let width = layout(area, panes).0.map_or(area.width, |d| d.width);
+                            match &mut mode {
+                                Mode::Host { host, workload, .. } => {
+                                    let last = hosts[*host].workloads.list.len().saturating_sub(1);
+                                    *workload = if up { workload.saturating_sub(1) } else { (*workload + 1).min(last) };
+                                }
+                                Mode::Overview => {
+                                    let cols = cols(width, hosts.len());
+                                    if up {
+                                        selected = selected.saturating_sub(cols);
+                                    } else if selected + cols < hosts.len() {
+                                        selected += cols;
+                                    }
+                                }
+                            }
+                        }
+                        _ => continue,
+                    }
+                    dirty = true;
                 }
                 Wake::Input(TermEvent::Key(k)) if k.kind != KeyEventKind::Release => {
                     dirty = true;
@@ -318,6 +418,15 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                     if k.code == KeyCode::Char('r') && k.modifiers.is_empty() && !hosts.is_empty() {
                         if matches!(hosts[in_view].state, crate::conn::State::Down(..)) {
                             shared.retry_now(in_view);
+                        }
+                        continue;
+                    }
+                    // `u`: a resident agent older than this viewer is updated.
+                    if k.code == KeyCode::Char('u') && k.modifiers.is_empty() && !hosts.is_empty() {
+                        let h = &mut hosts[in_view];
+                        if h.live() && h.outdated.is_some() && !h.updating {
+                            h.updating = true;
+                            conn::update_resident(in_view, config.hosts[in_view].clone(), shared.clone(), tx.clone());
                         }
                         continue;
                     }
@@ -385,6 +494,12 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             match ev {
                 Event::State(i, s) => hosts[i].set_state(s),
                 Event::Agent(i, msg) => hosts[i].apply(msg),
+                Event::Updated(i, failed) => {
+                    hosts[i].updating = false;
+                    if let Some(why) = failed {
+                        hosts[i].apply(crate::model::AgentMsg::Error(format!("update: {why}")));
+                    }
+                }
             }
             dirty = true;
         }
@@ -549,6 +664,7 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
         match ev {
             Event::State(_, State::Down(why, _)) => break Err(anyhow::anyhow!("{why}")),
             Event::State(_, s) => println!("{s:?}"),
+            Event::Updated(..) => {}
             Event::Agent(_, msg) => {
                 match &msg {
                     AgentMsg::Hello(h) => println!(
@@ -559,6 +675,10 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
                         if h.resident { ", resident" } else { "" }
                     ),
                     AgentMsg::Error(e) => println!("agent problem: {e}"),
+                    AgentMsg::OldResident(v) => println!(
+                        "the resident agent here is version {v}, too old for this viewer: \
+                         `nerdfleet resident enable` updates it"
+                    ),
                     AgentMsg::Inventory(_) | AgentMsg::Workloads(_) | AgentMsg::History(_) => {}
                     AgentMsg::Alerts(a) => {
                         for a in a {
@@ -831,6 +951,66 @@ mod tests {
         // The dashboard draws in either half without trouble.
         let hosts = vec![host("gpu-box", vec![nvidia()], State::Live), host("apu-box", vec![apu()], State::Live)];
         render(&hosts, SIDE_BY_SIDE / 2, 20);
+    }
+
+    #[test]
+    fn the_mouse_finds_the_part_the_screen_draws_there() {
+        use super::{held_at, layout, part_at, Panes, Part, SIDE_BY_SIDE};
+        let area = Rect::new(0, 0, SIDE_BY_SIDE, 50);
+        assert_eq!(part_at(area, Panes::default(), 0, 0), Some(Part::Dashboard));
+        let panes = Panes { term: Some(0), zoom: false, focus: false };
+        let (d, t) = layout(area, panes);
+        let (d, t) = (d.unwrap(), t.unwrap());
+        assert_eq!(part_at(area, panes, d.x, d.y), Some(Part::Dashboard));
+        assert_eq!(part_at(area, panes, 0, 0), None, "the ring");
+        assert_eq!(part_at(area, panes, d.x + d.width, 10), None, "the separator");
+        assert_eq!(part_at(area, panes, t.x + 3, t.y), Some(Part::Bar));
+        assert_eq!(part_at(area, panes, t.x + 3, t.y + 1), Some(Part::Terminal(3, 0)));
+        assert_eq!(part_at(area, panes, t.x + 3, t.y + 5), Some(Part::Terminal(3, 4)));
+        // A drag stays in the terminal, however far it wanders.
+        assert_eq!(held_at(area, panes, 0, 0), Some((0, 0)));
+        assert_eq!(held_at(area, panes, 500, 500), Some((t.width - 1, t.height - 2)));
+        assert_eq!(held_at(area, Panes::default(), 5, 5), None);
+        // Zoomed, there is only the terminal.
+        let zoom = Panes { term: Some(0), zoom: true, focus: true };
+        assert_eq!(part_at(area, zoom, 0, 0), Some(Part::Bar));
+        assert_eq!(part_at(area, zoom, 7, 1), Some(Part::Terminal(7, 0)));
+    }
+
+    #[test]
+    fn an_older_resident_agent_is_offered_an_update() {
+        let hello = |version: &str, resident| {
+            AgentMsg::Hello(Hello { protocol: 5, version: version.into(), target: "t".into(), resident })
+        };
+        let mut v = host("gpu-box", vec![], State::Live);
+        v.apply(hello("0.0.1", true));
+        assert!(v.update_note().unwrap().contains("0.0.1"));
+        assert!(render(std::slice::from_ref(&v), 110, 20).contains("u updates it"));
+        // Whole in the host view's bar, beside a terminal too.
+        let theme = nerdmux::embed::Theme::default();
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        super::host::HostUi { theme: &theme, host: &v, selected: 0, own_bg: false, window: 0 }.draw(area, &mut buf);
+        let bar: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(bar.contains("u updates it"), "{bar}");
+        // Not while it is away, and not for a new one or one of the viewer's own age.
+        v.set_state(State::Connecting);
+        assert_eq!(v.update_note(), None);
+        v.set_state(State::Live);
+        v.updating = true;
+        assert_eq!(v.update_note().unwrap(), "updating the resident agent…");
+        v.updating = false;
+        v.apply(hello(env!("CARGO_PKG_VERSION"), true));
+        assert_eq!(v.update_note(), None);
+        v.apply(hello("999.0.0", true));
+        assert_eq!(v.update_note(), None, "a newer one is never downgraded");
+        v.apply(hello("0.0.1", false));
+        assert_eq!(v.update_note(), None, "a viewer's own agent goes with it");
+        // One too old to speak the protocol is reported by the viewer's own agent.
+        v.apply(AgentMsg::OldResident("0.0.1".into()));
+        assert!(v.update_note().is_some());
+        v.apply(hello(env!("CARGO_PKG_VERSION"), true));
+        assert_eq!(v.update_note(), None, "the next connection clears it");
     }
 
     #[test]

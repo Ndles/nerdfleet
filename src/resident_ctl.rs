@@ -171,20 +171,27 @@ fn lingering_hint(host: &str, report: &str) {
     }
 }
 
-pub fn enable(host: &Host, control_dir: &Path) -> anyhow::Result<()> {
+/// Puts this viewer's agent on `host` as the resident one, in place of any
+/// other, and returns the script's report. Prints nothing, for the viewer's
+/// sake: `copying` is told when the agent has to be copied first.
+pub fn install(host: &Host, control_dir: &Path, agents: &Agents, copying: impl FnOnce()) -> anyhow::Result<String> {
     let target = Target::of(host, control_dir)?;
-    let agents = Agents::load()?;
     let agent = match &target {
         Target::Ssh(ssh) => agents.for_target(&ssh.probe()?)?,
         Target::Local => agents.for_target(&crate::agent::target())?,
     };
     let args = [agent.name.as_str(), agent.hash.as_str()];
     if target.run(VERIFY, &args, b"", &host.name).is_err() {
-        println!("Copying the agent to {}…", host.name);
+        copying();
         target.run(remote::UPLOAD_SCRIPT, &args, &agent.bytes, &host.name)?;
         target.run(VERIFY, &args, b"", &host.name)?;
     }
-    let report = target.run(ENABLE, &args, unit(agent).as_bytes(), &host.name)?;
+    target.run(ENABLE, &args, unit(agent).as_bytes(), &host.name)
+}
+
+pub fn enable(host: &Host, control_dir: &Path) -> anyhow::Result<()> {
+    let agents = Agents::load()?;
+    let report = install(host, control_dir, &agents, || println!("Copying the agent to {}…", host.name))?;
     println!("The resident agent runs on {}: it keeps 24 hours of history and raises alerts on its own.", host.name);
     lingering_hint(&host.name, &report);
     Ok(())

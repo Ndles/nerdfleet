@@ -38,6 +38,10 @@ pub enum AgentMsg {
     Alerts(Vec<Alert>),
     /// A sampler or a detector failed. The agent carries on without it.
     Error(String),
+    /// The version of a resident agent too old to speak this protocol. Sent
+    /// by the `agent --stdio` a viewer starts, which is that viewer's own
+    /// build, so it needs no new protocol: no older viewer ever receives it.
+    OldResident(String),
 }
 
 /// From the viewer to an agent.
@@ -65,6 +69,17 @@ pub struct Hello {
     pub target: String,
     /// A resident agent, which keeps sampling while nobody watches.
     pub resident: bool,
+}
+
+/// Whether version `a` comes before version `b`, number by number, and a
+/// pre-release before its release. A version from a host can say anything:
+/// what cannot be read is not older.
+pub fn older(a: &str, b: &str) -> bool {
+    fn key(v: &str) -> Option<(Vec<u32>, bool)> {
+        let (numbers, pre) = v.split_once('-').map_or((v, false), |(n, _)| (n, true));
+        Some((numbers.split('.').map(|n| n.parse().ok()).collect::<Option<_>>()?, !pre))
+    }
+    matches!((key(a), key(b)), (Some(a), Some(b)) if a < b)
 }
 
 /// What a host is: sent once after `Hello`, and again if it changes.
@@ -342,6 +357,10 @@ impl Wire for AgentMsg {
                 out.push(6);
                 a.put(out);
             }
+            AgentMsg::OldResident(v) => {
+                out.push(7);
+                v.put(out);
+            }
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -353,6 +372,7 @@ impl Wire for AgentMsg {
             4 => AgentMsg::Workloads(Wire::get(input)?),
             5 => AgentMsg::History(Wire::get(input)?),
             6 => AgentMsg::Alerts(Wire::get(input)?),
+            7 => AgentMsg::OldResident(Wire::get(input)?),
             _ => return Err(bad("unknown agent message")),
         })
     }
@@ -593,5 +613,26 @@ mod tests {
         assert!(AgentMsg::get(&mut [9].as_slice()).is_err());
         assert!(ViewerMsg::get(&mut [9].as_slice()).is_err());
         assert!(Vendor::get(&mut [9].as_slice()).is_err());
+    }
+
+    #[test]
+    fn versions_are_compared_by_number() {
+        assert!(older("0.2.9", "0.2.10"), "not as text");
+        assert!(older("0.1.9", "0.2.0"));
+        assert!(older("0.2.0-rc.1", "0.2.0"));
+        assert!(!older("0.2.0", "0.2.0"));
+        assert!(!older("0.2.0", "0.2.0-rc.1"));
+        assert!(!older("0.3.0", "0.2.9"));
+        for odd in ["", "x", "1..2", "../../etc", "-1"] {
+            assert!(!older(odd, "0.2.0"), "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn a_too_old_resident_is_reported_on_the_wire() {
+        let msg = AgentMsg::OldResident("0.1.0".into());
+        let mut buf = Vec::new();
+        msg.put(&mut buf);
+        assert_eq!(AgentMsg::get(&mut buf.as_slice()).unwrap(), msg);
     }
 }

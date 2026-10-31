@@ -65,8 +65,10 @@ publishes them; "Run workflow" builds them without publishing.
 
 ## Getting started
 
-List the hosts in `~/.config/nerdfleet/config.toml` (`nerdfleet config` prints an example). Each one is an alias from
-`~/.ssh/config`, which keeps the address, user, key and jump hosts:
+`nerdfleet add` lists the hosts in your `~/.ssh/config`, `Include`d files too, and adds the ones you pick to
+`~/.config/nerdfleet/config.toml`; `nerdfleet add gpu-box` adds one by name. Your comments in that file stay. It can
+also be written by hand (`nerdfleet config` prints an example). Each host is an alias from `~/.ssh/config`, which keeps
+the address, user, key and jump hosts:
 
 ```toml
 [[host]]
@@ -79,6 +81,7 @@ local = true        # the machine nerdfleet runs on
 ```
 
 ```sh
+nerdfleet add             # pick hosts from ~/.ssh/config
 nerdfleet                 # the overview
 nerdfleet check           # what is wrong with the config, if anything
 nerdfleet probe gpu-box   # connect to one host and print what it reports
@@ -93,6 +96,7 @@ nerdfleet probe gpu-box   # connect to one host and print what it reports
 | that terminal on the whole screen           | `z`                           |
 | move the keys between dashboard and terminal | `Ctrl+]`                     |
 | try a host that went away again             | `r`                           |
+| update a resident agent older than nerdfleet | `u`                          |
 | quit                                        | `q`                           |
 
 Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
@@ -111,6 +115,11 @@ Every key goes to the terminal except `Ctrl+]`, which gives the keys to the dash
 outlined, as nerdmux outlines its focused pane. `s` again puts the terminal away, still running; `z` gives it the whole
 screen. A terminal whose program ends closes by itself. Hosts cannot set this machine's clipboard or ring its bell.
 
+The mouse works too. A click moves the keys to the half it lands in, and the wheel scrolls whatever is under the
+pointer: the terminal's program or scrollback, the selected host, or the selected workload. Clicks and drags in a
+terminal go to its program. Since nerdfleet takes the mouse, your own terminal selects text with `Shift` held down,
+which is also how to copy from a host's terminal: what its nerdmux copies stays on the host.
+
 ## Resident agents
 
 By default the agent on a host runs only while you watch. To keep 24 hours of history and get alerts while you are
@@ -125,7 +134,8 @@ nerdfleet resident disable gpu-box    # --purge also removes its saved history
 
 Alerts show on the host's card and in its view, and as desktop notifications while nerdfleet runs. A user service
 stops at your last logout unless lingering is on for your user; `enable` tells you, and prints the command an admin
-would run. Run `enable` again after updating nerdfleet to update the agent.
+would run. After you update nerdfleet, a resident agent older than it says so on its card, and `u` updates it; its
+history and alerts stay. Running `enable` again does the same.
 
 ## How it reaches hosts
 

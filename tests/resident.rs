@@ -96,20 +96,21 @@ fn a_viewer_attaches_to_the_resident_agent_and_its_state_is_saved() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-#[test]
-fn an_older_resident_is_left_alone_and_the_viewer_is_told() {
+/// Starts `agent --stdio` beside a resident of another protocol and returns
+/// what the agent tells the viewer about it.
+fn told_about(name: &str, version: &str) -> AgentMsg {
     use nerdfleet::model::Hello;
     use std::os::unix::net::UnixListener;
-    let run = scratch("old-run");
-    let state = scratch("old-state");
+    let run = scratch(&format!("{name}-run"));
+    let state = scratch(&format!("{name}-state"));
     let dir = run.join("nerdfleet");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // A resident from an older build: it says hello in protocol 2.
+    // It says hello in protocol 2.
     let listener = UnixListener::bind(dir.join("agent.sock")).unwrap();
-    let old = std::thread::spawn(move || {
+    let hello = Hello { protocol: 2, version: version.into(), target: "x86_64-linux".into(), resident: true };
+    let other = std::thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
-        let hello = Hello { protocol: 2, version: "0.0.9".into(), target: "x86_64-linux".into(), resident: true };
         write_frame(&mut s, &Frame { route: vec![], msg: AgentMsg::Hello(hello) }).unwrap();
     });
     let mut viewer =
@@ -118,12 +119,20 @@ fn an_older_resident_is_left_alone_and_the_viewer_is_told() {
     let mut next = || read_frame::<_, Frame<AgentMsg>>(&mut out).unwrap().unwrap().msg;
     let AgentMsg::Hello(h) = next() else { panic!("no hello") };
     assert!(!h.resident, "it samples by itself");
-    let AgentMsg::Error(e) = next() else { panic!("not told") };
-    assert!(e.contains("older build") && e.contains("resident enable"), "{e}");
+    let told = next();
     assert!(matches!(next(), AgentMsg::Inventory(_)));
     drop(viewer.stdin.take());
     viewer.wait().unwrap();
-    old.join().unwrap();
+    other.join().unwrap();
     let _ = std::fs::remove_dir_all(&run);
     let _ = std::fs::remove_dir_all(&state);
+    told
+}
+
+#[test]
+fn a_resident_of_another_protocol_is_left_alone_and_the_viewer_is_told() {
+    assert_eq!(told_about("old", "0.0.9"), AgentMsg::OldResident("0.0.9".into()));
+    // A newer one is not called out of date, and no update is offered.
+    let AgentMsg::Error(e) = told_about("new", "999.0.0") else { panic!("not told") };
+    assert!(e.contains("another build") && e.contains("update this nerdfleet"), "{e}");
 }

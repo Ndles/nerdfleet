@@ -3,7 +3,7 @@
 use crate::config::Host;
 use crate::conn::State;
 use crate::history::{self, History};
-use crate::model::{AgentMsg, Alert, AlertKind, Inventory, Sample, Workloads};
+use crate::model::{older, AgentMsg, Alert, AlertKind, Inventory, Sample, Workloads};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Agent problems kept per host.
@@ -28,6 +28,10 @@ pub struct HostView {
     pub problems: Vec<String>,
     /// The agent is resident: it keeps history and raises alerts on its own.
     pub resident: bool,
+    /// The version of a resident agent older than this viewer.
+    pub outdated: Option<String>,
+    /// That agent is being updated.
+    pub updating: bool,
     pub alerts: Vec<Alert>,
     /// Alerts up to this id have been seen in the host view.
     pub read_up_to: u64,
@@ -54,6 +58,8 @@ impl HostView {
             history: History::default(),
             problems: Vec::new(),
             resident: false,
+            outdated: None,
+            updating: false,
             alerts: Vec::new(),
             read_up_to: 0,
             fresh: Vec::new(),
@@ -66,7 +72,12 @@ impl HostView {
 
     pub fn apply(&mut self, msg: AgentMsg) {
         match msg {
-            AgentMsg::Hello(h) => self.resident = h.resident,
+            AgentMsg::Hello(h) => {
+                self.resident = h.resident;
+                let old = h.resident && older(&h.version, env!("CARGO_PKG_VERSION"));
+                self.outdated = old.then_some(h.version);
+            }
+            AgentMsg::OldResident(version) => self.outdated = Some(version),
             AgentMsg::Inventory(inv) => self.inventory = Some(inv),
             AgentMsg::Sample(s) => {
                 // A sample that does not match the inventory is from a
@@ -172,6 +183,15 @@ impl HostView {
 
     pub fn live(&self) -> bool {
         self.state == State::Live
+    }
+
+    /// What to say about an out-of-date resident agent, if anything.
+    pub fn update_note(&self) -> Option<String> {
+        if self.updating {
+            return Some("updating the resident agent…".into());
+        }
+        let version: String = self.outdated.as_ref().filter(|_| self.live())?.chars().take(24).collect();
+        Some(format!("older resident agent {version}: u updates it"))
     }
 }
 
