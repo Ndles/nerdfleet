@@ -38,7 +38,7 @@ an issue saying how it went, good or bad, helps.
 
 ## Build
 
-Needs Rust 1.85 or newer. nerdfleet uses nerdmux's terminal as a library, at the commit `Cargo.toml` pins; Cargo
+Needs Rust 1.88 or newer. nerdfleet uses nerdmux's terminal as a library, at the commit `Cargo.toml` pins; Cargo
 fetches it.
 
 ```sh
