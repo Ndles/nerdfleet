@@ -490,7 +490,7 @@ dependencies = [
 [[package]]
 name = "nerdmux"
 version = "0.1.0"
-source = "git+https://github.com/Ndles/nerdmux?rev=e0f76572bf824e72d5955a8cc4ff23506b229048#e0f76572bf824e72d5955a8cc4ff23506b229048"
+source = "git+https://github.com/Ndles/nerdmux?rev=620a43ccfeb1c2adbf49d79ea7301e7c4f539d39#620a43ccfeb1c2adbf49d79ea7301e7c4f539d39"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
