@@ -1,6 +1,6 @@
 [package]
 name = "nerdfleet"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Pavel Kuksa"]
 edition = "2021"
 description = "Watch a fleet of machines from one terminal: GPUs, CPUs, memory and the training and inference running on them"
