@@ -55,13 +55,10 @@ impl Ui<'_> {
                 Line::from(Span::styled("No hosts yet.", Style::default().fg(t.fg).add_modifier(Modifier::BOLD))),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("Add them to ", Style::default().fg(t.dim)),
-                    Span::styled(self.config_path.display().to_string(), Style::default().fg(t.cyan)),
+                    Span::styled("`nerdfleet add`", Style::default().fg(t.cyan)),
+                    Span::styled(" picks them from ~/.ssh/config, or edit ", Style::default().fg(t.dim)),
                 ]),
-                Line::from(vec![
-                    Span::styled("`nerdfleet config`", Style::default().fg(t.cyan)),
-                    Span::styled(" prints an example.", Style::default().fg(t.dim)),
-                ]),
+                Line::from(Span::styled(self.config_path.display().to_string(), Style::default().fg(t.cyan))),
             ];
             let h = msg.len() as u16;
             let r = Rect { y: body.y + body.height.saturating_sub(h) / 2, height: h.min(body.height), ..body };
@@ -312,6 +309,9 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
             format!("⚠ {}", newest.message)
         };
         lines.push(Line::from(Span::styled(fit(&text, iw), Style::default().fg(t.red).add_modifier(Modifier::BOLD))));
+    }
+    if let Some(note) = host.update_note() {
+        lines.push(Line::from(Span::styled(fit(&note, iw), Style::default().fg(t.yellow))));
     }
     if let Some(p) = host.problems.last() {
         lines.push(Line::from(Span::styled(fit(&format!("! {p}"), iw), Style::default().fg(t.yellow))));

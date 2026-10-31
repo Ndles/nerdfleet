@@ -90,7 +90,11 @@ impl HostUi<'_> {
             Span::styled(format!(" › {} ", h.name), Style::default().fg(t.status_fg).add_modifier(Modifier::BOLD)),
         ];
         match &h.state {
-            State::Live => {}
+            State::Live => {
+                if let Some(note) = h.update_note() {
+                    left.push(Span::styled(format!(" {note} "), Style::default().fg(t.yellow)));
+                }
+            }
             State::Down(_, retry) => {
                 left.push(Span::styled(" down ", Style::default().fg(t.red)));
                 left.push(Span::raw(" "));

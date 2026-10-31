@@ -63,7 +63,7 @@ fn agent_says_hello_then_describes_and_measures_the_host() {
                 }
             }
             AgentMsg::Hello(_) => panic!("second hello"),
-            AgentMsg::History(_) | AgentMsg::Alerts(_) => {}
+            AgentMsg::History(_) | AgentMsg::Alerts(_) | AgentMsg::OldResident(_) => {}
         }
     }
     let inventory = inventory.expect("no inventory before samples");

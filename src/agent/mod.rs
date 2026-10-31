@@ -105,14 +105,16 @@ pub fn run_stdio() -> anyhow::Result<()> {
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     send(&mut out, AgentMsg::Hello(hello(false)))?;
     if let Some(h) = mismatch {
-        send(
-            &mut out,
+        let msg = if crate::model::older(&h.version, env!("CARGO_PKG_VERSION")) {
+            AgentMsg::OldResident(h.version)
+        } else {
             AgentMsg::Error(format!(
-                "the resident agent here is an older build (version {}, protocol {}); \
-                 run `nerdfleet resident enable` for this host to update it",
+                "the resident agent here is another build (version {}, protocol {}): update this nerdfleet, \
+                 or run `nerdfleet resident enable` for this host to replace it",
                 h.version, h.protocol
-            )),
-        )?;
+            ))
+        };
+        send(&mut out, msg)?;
     }
     let inbox = listen();
     let mut core = core::Core::new(Default::default(), Vec::new());
