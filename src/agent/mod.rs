@@ -109,7 +109,11 @@ pub fn run_stdio() -> anyhow::Result<()> {
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     send(&mut out, AgentMsg::Hello(hello(false)))?;
     if let Some(h) = mismatch {
-        let msg = if crate::model::older(&h.version, env!("CARGO_PKG_VERSION")) {
+        // Protocols only grow: a resident speaking an earlier one is older, whatever its version says
+        // (a protocol can change between releases), and `u` replaces it.
+        let older =
+            h.protocol < crate::proto::PROTOCOL_VERSION || crate::model::older(&h.version, env!("CARGO_PKG_VERSION"));
+        let msg = if older {
             AgentMsg::OldResident(h.version)
         } else {
             AgentMsg::Error(format!(
