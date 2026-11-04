@@ -366,11 +366,17 @@ impl Tracker {
             if card.version != 1 {
                 continue;
             }
-            let ended = card.ended_ms.unwrap_or(0);
+            let live = card.pid.is_some_and(|p| alive(p, card.pid_start));
+            // A run that died never wrote its end: the card's last write stands in for it.
+            let written = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+            let ended = card.ended_ms.filter(|e| *e > 0).unwrap_or(if live {
+                0
+            } else {
+                written.map_or(0, |d| d.as_millis() as u64)
+            });
             if ended > 0 && now_ms.saturating_sub(ended) > FORGET_MS {
                 continue;
             }
-            let live = card.pid.is_some_and(|p| alive(p, card.pid_start));
             let key = key.to_string();
             seen.insert(key.clone());
             match card.kind.as_str() {
@@ -534,7 +540,11 @@ impl Tracker {
             series: m.series.values(),
             evals: m.evals.iter().copied().collect(),
             started_ms: card.started_ms.unwrap_or(0),
-            ended_ms: card.ended_ms.unwrap_or(0),
+            // A died run's end is its last sign of life: its last step, or the file's last write.
+            ended_ms: match st {
+                RunStatus::Died => card.ended_ms.filter(|e| *e > 0).unwrap_or(r.last_step_ms),
+                _ => card.ended_ms.unwrap_or(0),
+            },
         })
     }
 
@@ -662,13 +672,14 @@ mod tests {
         card(&dir, "old", r#"{"version":1,"kind":"run","metrics":"/x","status":"finished","ended_ms":1}"#);
         card(&dir, "dead", &running.replace(&format!("\"pid\":{me}"), "\"pid\":999999999"));
         let mut t = Tracker { dir: Some(dir.clone()), ..Default::default() };
-        let now = 10_000_000_000_000;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         let (runs, notes) = t.update(now, &[], &[]);
         assert!(notes.is_empty(), "nothing is news at first sight");
         let a = runs.runs.iter().find(|r| r.key == "a").unwrap();
         assert_eq!((a.status, a.step, a.max_steps, a.loss), (RunStatus::Running, 2002, 2400, Some(2.9)));
         let dead = runs.runs.iter().find(|r| r.key == "dead").unwrap();
         assert_eq!(dead.status, RunStatus::Died);
+        assert!(dead.ended_ms > 0, "a died run ends at its last sign of life");
         assert!(runs.runs.iter().all(|r| r.key != "old"));
         assert_eq!(runs.runs[0].status, RunStatus::Running);
 
