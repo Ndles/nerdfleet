@@ -3,7 +3,7 @@
 use crate::config::Host;
 use crate::conn::State;
 use crate::history::{self, History};
-use crate::model::{older, AgentMsg, Alert, AlertKind, Inventory, Sample, Workloads};
+use crate::model::{older, AgentMsg, Alert, AlertKind, Inventory, RunInfo, RunStatus, Runs, Sample, Workloads};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Agent problems kept per host.
@@ -23,6 +23,8 @@ pub struct HostView {
     pub inventory: Option<Inventory>,
     pub sample: Option<Sample>,
     pub workloads: Workloads,
+    /// Training runs and queues, from the host's run cards.
+    pub runs: Runs,
     pub last_seen: Option<Instant>,
     pub history: History,
     pub problems: Vec<String>,
@@ -54,6 +56,7 @@ impl HostView {
             inventory: None,
             sample: None,
             workloads: Workloads::default(),
+            runs: Runs::default(),
             last_seen: None,
             history: History::default(),
             problems: Vec::new(),
@@ -97,6 +100,7 @@ impl HostView {
                     self.workloads = w;
                 }
             }
+            AgentMsg::Runs(r) => self.runs = r,
             // The decoder already refused histories that do not fit.
             AgentMsg::History(h) => self.history = h,
             AgentMsg::Alerts(list) => {
@@ -113,6 +117,16 @@ impl HostView {
                 }
             }
         }
+    }
+
+    /// The run `n` opens nerdtui on: the selected workload's, else the first
+    /// running one, else the one that ended last.
+    pub fn focus_run(&self, workload: Option<usize>) -> Option<&RunInfo> {
+        let id = workload.and_then(|i| self.workloads.list.get(i)).map(|w| w.id);
+        let runs = &self.runs.runs;
+        id.and_then(|id| runs.iter().find(|r| r.workload == id && r.status == RunStatus::Running))
+            .or_else(|| runs.iter().find(|r| r.status == RunStatus::Running))
+            .or_else(|| runs.first())
     }
 
     fn add_alert(&mut self, a: Alert) {

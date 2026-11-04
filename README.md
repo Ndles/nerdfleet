@@ -101,12 +101,27 @@ nerdfleet probe gpu-box   # connect to one host and print what it reports
 | move the keys between dashboard and terminal | `Ctrl+]`                     |
 | try a host that went away again             | `r`                           |
 | update a resident agent older than nerdfleet | `u`                          |
+| watch the host's training run in nerdtui     | `n`                          |
 | quit                                        | `q`                           |
 
 Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
 (`CPU`), named the way you would name them (`torchrun train.py`, `llama-swap · Qwen3-8B-Q4_K_M`). The host view adds
 graphs, every GPU in full, each workload's models, processes and command line (with keys and passwords masked on the
 host), and the busiest processes.
+
+## Training runs
+
+A training run that writes a [run card](docs/runcards.md), as nerdtrain's do, shows on its host's card as a `RUN`
+line: its name, step of steps, training and eval loss, and the time left at its recent pace. A queue of runs (an
+experiment, say) shows as a `QUEUE` line with how many of its jobs are done and what it is doing now. The host view
+lists them all, with each run's loss curve so far, its pace, and where it lives. Their news comes as alerts: a
+non-finite loss, a run that stops making steps while its process lives, one that finishes or fails, and one whose
+process is gone before its last step.
+
+`n` opens [nerdtui](https://github.com/Ndles/nerdtui) on the run, in the host's terminal: in a window of its nerdmux
+named after the run, so it keeps running when you put the terminal away and the next `n` comes back to it. nerdtui
+runs on the host and reads the run's files there; the host needs nerdtui installed (`nerdtui --install`). In the
+host view `n` picks the selected workload's run, marked `▶`; elsewhere, the run that is training.
 
 ## Terminals
 
@@ -147,8 +162,9 @@ history and alerts stay. Running `enable` again does the same.
   and host keys all come from `~/.ssh/config`. The config file has no place for passwords, tokens or keys. One SSH
   connection per host is shared by everything nerdfleet opens there, so a password or second factor is asked once.
 - **No ports, no daemons, no root.** On first contact nerdfleet copies its agent to `~/.cache/nerdfleet/` on the host
-  (mode 700, checked against its SHA-256 before every start). It runs as you, only reads `/proc`, `/sys` and the GPU
-  drivers, and exits when you quit, unless you made it resident.
+  (mode 700, checked against its SHA-256 before every start). It runs as you, only reads `/proc`, `/sys`, the GPU
+  drivers and your own [run cards](docs/runcards.md) with the metrics files they name, and exits when you quit, unless
+  you made it resident.
 - **Hosts are not trusted.** Everything an agent sends is size-limited and cleaned of escape sequences before it is
   drawn, so a compromised machine cannot take over the terminal that watches it.
 - **It gives up politely.** A host that goes away is tried 8 times over about three minutes, and its card says which

@@ -42,6 +42,9 @@ pub enum AgentMsg {
     /// by the `agent --stdio` a viewer starts, which is that viewer's own
     /// build, so it needs no new protocol: no older viewer ever receives it.
     OldResident(String),
+    /// Training runs and queues the host's run cards describe (docs/runcards.md),
+    /// after each workload update.
+    Runs(Runs),
 }
 
 /// From the viewer to an agent.
@@ -233,6 +236,14 @@ pub enum AlertKind {
     GpuMemoryFull,
     /// The viewer lost the host (made by the viewer, not an agent).
     HostUnreachable,
+    /// A run logged a non-finite loss.
+    RunNonfinite,
+    /// A run's process lives, but its steps stopped coming.
+    RunStalled,
+    /// A run finished, or failed and said so.
+    RunEnded,
+    /// A run's process is gone before its last step, without saying why.
+    RunDied,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -324,6 +335,91 @@ pub struct Proc {
     pub job: u32,
 }
 
+/// How a run or a queue stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    Running,
+    Finished,
+    /// It said it failed.
+    Failed,
+    /// Its process is gone, and it never said it ended.
+    Died,
+}
+
+impl RunStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            RunStatus::Running => "running",
+            RunStatus::Finished => "finished",
+            RunStatus::Failed => "failed",
+            RunStatus::Died => "died",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Runs {
+    pub runs: Vec<RunInfo>,
+    pub queues: Vec<QueueInfo>,
+}
+
+/// One training run, from its card and its metrics file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunInfo {
+    /// The card's file name, without `.json`: stable while the run lives.
+    pub key: String,
+    pub name: String,
+    pub run_dir: String,
+    pub status: RunStatus,
+    /// The workload it is part of, by `Workload::id`; 0 for none.
+    pub workload: u32,
+    pub start_step: u32,
+    pub max_steps: u32,
+    /// The last step its metrics reached; `start_step` before the first.
+    pub step: u32,
+    /// The last training loss, if it was finite.
+    pub loss: Option<f32>,
+    /// The last eval loss, and its step.
+    pub eval: Option<f32>,
+    pub eval_step: u32,
+    pub tokens_per_s: Option<f32>,
+    /// Seconds per step, recently.
+    pub step_s: Option<f32>,
+    /// Seconds to `max_steps` at that pace, while running.
+    pub eta_s: Option<u32>,
+    /// Seconds since the last new step, while running.
+    pub quiet_s: u32,
+    /// Steps whose loss was not finite.
+    pub nonfinite: u32,
+    /// Complete lines that could not be read.
+    pub bad_lines: u32,
+    /// The training loss over the run so far, oldest first, evenly thinned
+    /// to at most `SERIES` points; finite values only.
+    pub series: Vec<f32>,
+    /// Eval losses, oldest first, at most `SERIES`.
+    pub evals: Vec<f32>,
+    pub started_ms: u64,
+    pub ended_ms: u64,
+}
+
+/// The most points a run's series carries.
+pub const SERIES: usize = 240;
+
+/// A sequence of jobs, such as an experiment's runs and their scoring.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueInfo {
+    pub key: String,
+    pub name: String,
+    pub status: RunStatus,
+    pub done: u16,
+    pub failed: u16,
+    pub total: u16,
+    /// What it is doing now; empty when nothing.
+    pub current: String,
+    pub started_ms: u64,
+    pub updated_ms: u64,
+}
+
 // ===== wire =================================================================
 
 impl Wire for AgentMsg {
@@ -361,6 +457,10 @@ impl Wire for AgentMsg {
                 out.push(7);
                 v.put(out);
             }
+            AgentMsg::Runs(r) => {
+                out.push(8);
+                r.put(out);
+            }
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -373,6 +473,7 @@ impl Wire for AgentMsg {
             5 => AgentMsg::History(Wire::get(input)?),
             6 => AgentMsg::Alerts(Wire::get(input)?),
             7 => AgentMsg::OldResident(Wire::get(input)?),
+            8 => AgentMsg::Runs(Wire::get(input)?),
             _ => return Err(bad("unknown agent message")),
         })
     }
@@ -433,6 +534,10 @@ impl Wire for AlertKind {
             AlertKind::GpuThrottled => 4,
             AlertKind::HostUnreachable => 5,
             AlertKind::GpuMemoryFull => 6,
+            AlertKind::RunNonfinite => 7,
+            AlertKind::RunStalled => 8,
+            AlertKind::RunEnded => 9,
+            AlertKind::RunDied => 10,
         });
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -444,7 +549,56 @@ impl Wire for AlertKind {
             4 => AlertKind::GpuThrottled,
             5 => AlertKind::HostUnreachable,
             6 => AlertKind::GpuMemoryFull,
+            7 => AlertKind::RunNonfinite,
+            8 => AlertKind::RunStalled,
+            9 => AlertKind::RunEnded,
+            10 => AlertKind::RunDied,
             _ => return Err(bad("unknown alert kind")),
+        })
+    }
+}
+wire_struct!(Runs { runs, queues });
+wire_struct!(RunInfo {
+    key,
+    name,
+    run_dir,
+    status,
+    workload,
+    start_step,
+    max_steps,
+    step,
+    loss,
+    eval,
+    eval_step,
+    tokens_per_s,
+    step_s,
+    eta_s,
+    quiet_s,
+    nonfinite,
+    bad_lines,
+    series,
+    evals,
+    started_ms,
+    ended_ms
+});
+wire_struct!(QueueInfo { key, name, status, done, failed, total, current, started_ms, updated_ms });
+
+impl Wire for RunStatus {
+    fn put(&self, out: &mut Vec<u8>) {
+        out.push(match self {
+            RunStatus::Running => 0,
+            RunStatus::Finished => 1,
+            RunStatus::Failed => 2,
+            RunStatus::Died => 3,
+        });
+    }
+    fn get(input: &mut &[u8]) -> io::Result<Self> {
+        Ok(match u8::get(input)? {
+            0 => RunStatus::Running,
+            1 => RunStatus::Finished,
+            2 => RunStatus::Failed,
+            3 => RunStatus::Died,
+            _ => return Err(bad("unknown run status")),
         })
     }
 }

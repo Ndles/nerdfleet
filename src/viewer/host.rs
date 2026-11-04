@@ -2,10 +2,12 @@
 //! every workload with its processes, and the busiest processes.
 
 use super::app::HostView;
-use super::ui::{bar, fit, gib, kind_color, level, rate, short_name, span, wrap, STALL_S};
+use super::ui::{
+    bar, fit, gib, kind_color, left as duration, level, loss, rate, run_color, short_name, si, span, wrap, STALL_S,
+};
 use crate::conn::State;
 use crate::history::NONE;
-use crate::model::{AlertKind, Gpu, GpuInfo, Kind, Power, Sample, Vendor};
+use crate::model::{AlertKind, Gpu, GpuInfo, Kind, Power, RunStatus, Sample, Vendor};
 use nerdmux::embed::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -66,6 +68,25 @@ fn spark(series: &VecDeque<u8>, newest: u64, cap: usize, width: usize) -> String
     cells(series, newest, cap, width).into_iter().map(super::ui::level_char).collect()
 }
 
+/// `series` (any numbers) as `width` cells of blocks, scaled between its own
+/// lowest and highest values: a loss curve's shape, not its level.
+fn line_spark(series: &[f32], width: usize) -> String {
+    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if series.is_empty() || width == 0 {
+        return String::new();
+    }
+    let n = series.len().min(width);
+    let cells: Vec<f32> = (0..n)
+        .map(|i| {
+            let (a, b) = (i * series.len() / n, ((i + 1) * series.len() / n).max(i * series.len() / n + 1));
+            series[a..b].iter().sum::<f32>() / (b - a) as f32
+        })
+        .collect();
+    let (lo, hi) = cells.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let span = (hi - lo).max(f32::EPSILON);
+    cells.iter().map(|v| BLOCKS[(((v - lo) / span) * 7.0).round().clamp(0.0, 7.0) as usize]).collect()
+}
+
 /// The graph windows `t` steps through: one per history ring.
 pub const WINDOWS: [&str; 3] = ["15m", "6h", "24h"];
 
@@ -107,7 +128,15 @@ impl HostUi<'_> {
         left.render(bar_area, buf);
         let keys = super::ui::keys_line(
             t,
-            &[("↑↓", "workload"), ("t", "window"), ("s", "terminal"), ("z", "zoom"), ("Esc", "back"), ("q", "quit")],
+            &[
+                ("↑↓", "workload"),
+                ("t", "window"),
+                ("s", "terminal"),
+                ("n", "nerdtui"),
+                ("z", "zoom"),
+                ("Esc", "back"),
+                ("q", "quit"),
+            ],
         );
         let kw = keys.width() as u16;
         // The keys only where they leave the left side whole.
@@ -137,7 +166,8 @@ impl HostUi<'_> {
         } else {
             (w, w)
         };
-        let mut left = self.workloads(left_w, s.time_ms / 1000);
+        let mut left = self.runs(left_w);
+        left.extend(self.workloads(left_w, s.time_ms / 1000));
         let mut right = self.disks(right_w);
         right.push(Line::from(""));
         right.extend(self.alerts(right_w));
@@ -344,6 +374,86 @@ impl HostUi<'_> {
     }
 
     /// Every workload, then the selected one in full.
+    /// Training runs and queues from the host's run cards, the one `n` opens
+    /// marked; nothing when the host has none.
+    fn runs(&self, width: usize) -> Vec<Line<'static>> {
+        let t = self.theme;
+        let dim = Style::default().fg(t.dim);
+        let r = &self.host.runs;
+        if r.runs.is_empty() && r.queues.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![self.rule(&format!("RUNS  {}", r.runs.len()), Vec::new(), width)];
+        for q in &r.queues {
+            let mut text = super::ui::queue_text(q);
+            text = fit(&text, width.saturating_sub(2));
+            let color = if q.status == RunStatus::Running { t.cyan } else { dim.fg.unwrap_or(t.dim) };
+            lines.push(Line::from(vec![Span::styled("≡ ", Style::default().fg(color)), Span::styled(text, dim)]));
+        }
+        let focus = self.host.focus_run(Some(self.selected)).map(|f| f.key.clone());
+        // Name and numbers, then the loss so far as a sparkline in what is left.
+        const SPARK: usize = 24;
+        for run in &r.runs {
+            let marked = focus.as_deref() == Some(run.key.as_str());
+            let color = run_color(t, run);
+            let steps =
+                if run.max_steps > 0 { format!("{}/{}", run.step, run.max_steps) } else { format!("{}", run.step) };
+            let mut nums = format!("{steps:>11}  loss {:<7}", loss(run.loss));
+            if run.eval.is_some() {
+                nums.push_str(&format!(" val {:<7}", loss(run.eval)));
+            }
+            let spark = if run.series.len() > 1 { line_spark(&run.series, SPARK) } else { String::new() };
+            let name_w = width.saturating_sub(2 + nums.chars().count() + SPARK + 2).max(12);
+            let mark = if marked { "▶ " } else { "  " };
+            let style = if marked { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
+            lines.push(Line::from(vec![
+                Span::styled(mark, Style::default().fg(t.accent)),
+                Span::styled(format!("{:<name_w$}", fit(&run.name, name_w.saturating_sub(1))), style.fg(t.fg)),
+                Span::styled(nums, Style::default().fg(t.fg)),
+                Span::raw("  "),
+                Span::styled(spark, Style::default().fg(color)),
+            ]));
+            let mut info = vec![run.status.label().to_string()];
+            match run.status {
+                RunStatus::Running => {
+                    if let Some(eta) = run.eta_s {
+                        info.push(format!("{} left", duration(eta as u64)));
+                    }
+                    if run.quiet_s >= super::ui::QUIET_S {
+                        info.push(format!("no step for {}", duration(run.quiet_s as u64)));
+                    }
+                }
+                _ if run.max_steps > 0 && run.step < run.max_steps && run.status != RunStatus::Finished => {
+                    info.push(format!("stopped {} short", run.max_steps - run.step));
+                }
+                _ => {}
+            }
+            if let Some(tps) = run.tokens_per_s {
+                info.push(format!("{} tok/s", si(tps as f64)));
+            }
+            if let Some(st) = run.step_s {
+                info.push(format!("{st:.2} s/step"));
+            }
+            if run.eval.is_some() {
+                info.push(format!("eval at {}", run.eval_step));
+            }
+            if run.nonfinite > 0 {
+                info.push(format!("{} non-finite", run.nonfinite));
+            }
+            if run.bad_lines > 0 {
+                info.push(format!("{} unreadable lines", run.bad_lines));
+            }
+            info.push(run.run_dir.clone());
+            let text = fit(&info.join(" · "), width.saturating_sub(2));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(text, Style::default().fg(if color == t.magenta { t.dim } else { color })),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines
+    }
+
     fn workloads(&self, width: usize, now_s: u64) -> Vec<Line<'static>> {
         let t = self.theme;
         let dim = Style::default().fg(t.dim);
@@ -502,8 +612,12 @@ impl HostUi<'_> {
         for a in h.alerts.iter().rev().take(8) {
             let fresh = a.id > h.read_up_to;
             let color = match a.kind {
-                AlertKind::WorkloadEnded => t.fg,
-                AlertKind::DiskFull | AlertKind::HostUnreachable | AlertKind::TrainingStalled => t.red,
+                AlertKind::WorkloadEnded | AlertKind::RunEnded => t.fg,
+                AlertKind::DiskFull
+                | AlertKind::HostUnreachable
+                | AlertKind::TrainingStalled
+                | AlertKind::RunDied
+                | AlertKind::RunNonfinite => t.red,
                 _ => t.yellow,
             };
             let mut style = Style::default().fg(color);

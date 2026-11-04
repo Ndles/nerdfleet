@@ -409,6 +409,38 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         show_host(&mut mode, &shared, in_view);
                         continue;
                     }
+                    // `n`: nerdtui on the host's run (the selected workload's, else
+                    // the one training), in that host's terminal: a window of its
+                    // nerdmux, so it keeps running when the terminal goes.
+                    if k.code == KeyCode::Char('n') && k.modifiers.is_empty() && !hosts.is_empty() {
+                        let workload = match mode {
+                            Mode::Host { host, workload, .. } if host == in_view => Some(workload),
+                            _ => None,
+                        };
+                        let Some(run) = hosts[in_view].focus_run(workload).cloned() else { continue };
+                        let next = Panes { term: Some(in_view), zoom: false, focus: true };
+                        let size = term_size(&term, next)?;
+                        next_shell += 1;
+                        let opened = shell::open_run(
+                            &config.hosts[in_view],
+                            &control_dir,
+                            next_shell,
+                            size,
+                            wake_tx.clone(),
+                            &run.run_dir,
+                            &run.name,
+                        );
+                        match opened {
+                            Ok(s) => shells[in_view] = Some(s),
+                            Err(e) => {
+                                hosts[in_view].apply(crate::model::AgentMsg::Error(format!("nerdtui: {e}")));
+                                continue;
+                            }
+                        }
+                        panes = next;
+                        show_host(&mut mode, &shared, in_view);
+                        continue;
+                    }
                     // Ctrl+]: the keys back to the terminal beside.
                     if shell::is_escape(&k) {
                         panes.focus = panes.term.is_some();
@@ -679,7 +711,7 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
                         "the resident agent here is version {v}, too old for this viewer: \
                          `nerdfleet resident enable` updates it"
                     ),
-                    AgentMsg::Inventory(_) | AgentMsg::Workloads(_) | AgentMsg::History(_) => {}
+                    AgentMsg::Inventory(_) | AgentMsg::Workloads(_) | AgentMsg::History(_) | AgentMsg::Runs(_) => {}
                     AgentMsg::Alerts(a) => {
                         for a in a {
                             println!("alert {}", a.message);
@@ -755,6 +787,13 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
             if w.gpu_idle_s > 0 { format!(" · GPUs idle {}s", w.gpu_idle_s) } else { String::new() },
         );
         println!("     $ {}", w.cmdline);
+    }
+    for r in &view.runs.runs {
+        println!("run  {}", ui::run_text(r));
+        println!("     {} · series {} points, {} evals", r.run_dir, r.series.len(), r.evals.len());
+    }
+    for q in &view.runs.queues {
+        println!("queue {}", ui::queue_text(q));
     }
     for p in &view.workloads.top {
         let job = view.workloads.list.iter().find(|w| p.job != 0 && w.id == p.job).map_or("-", |w| w.label.as_str());
