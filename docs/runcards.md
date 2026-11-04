@@ -4,7 +4,8 @@ A run card is a small JSON file a training process writes to say where it is: wh
 how far it will go, and which process it is. nerdfleet's agent reads the cards on its host to show each run's
 step, loss, eval and ETA on the host's card, raise alerts about runs, and open
 [nerdtui](https://github.com/Ndles/nerdtui) on one. A queue card does the same for a sequence of jobs, such as an
-experiment's runs and their scoring. Any trainer can write them; nerdtrain does (`nerdtrain/utils/runcard.py`).
+experiment's runs and their scoring. Any trainer can write them: [training.md](training.md) shows how, with a
+helper to copy ([examples/runcard.py](../examples/runcard.py)). This page is the format itself.
 
 ## Where
 

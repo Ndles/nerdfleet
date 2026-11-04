@@ -123,6 +123,10 @@ named after the run, so it keeps running when you put the terminal away and the 
 runs on the host and reads the run's files there; the host needs nerdtui installed (`nerdtui --install`). In the
 host view `n` picks the selected workload's run, marked `▶`; elsewhere, the run that is training.
 
+[docs/training.md](docs/training.md) shows how to set it up for your own trainer: a stand-alone Python helper
+([examples/runcard.py](examples/runcard.py)) that writes the metrics and the card, hooks for PyTorch Lightning
+and the Hugging Face Trainer, and what to check when a run does not show.
+
 ## Terminals
 
 `s` opens a terminal on the host beside its graphs and processes, side by side on wide screens and one above the
