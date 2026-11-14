@@ -407,7 +407,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         show_host(&mut mode, &shared, in_view);
                         continue;
                     }
-                    // `n`: nerdtui on the host's run (the selected workload's, else
+                    // `n`: nerdscope on the host's run (the selected workload's, else
                     // the one training), in that host's terminal: a window of its
                     // nerdmux, so it keeps running when the terminal goes.
                     if k.code == KeyCode::Char('n') && k.modifiers.is_empty() && !hosts.is_empty() {
@@ -431,7 +431,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         match opened {
                             Ok(s) => shells[in_view] = Some(s),
                             Err(e) => {
-                                hosts[in_view].apply(crate::model::AgentMsg::Error(format!("nerdtui: {e}")));
+                                hosts[in_view].apply(crate::model::AgentMsg::Error(format!("nerdscope: {e}")));
                                 continue;
                             }
                         }

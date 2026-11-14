@@ -3,7 +3,7 @@
 A run card is a small JSON file a training process writes to say where it is: which metrics file it appends to,
 how far it will go, and which process it is. nerdfleet's agent reads the cards on its host to show each run's
 step, loss, eval and ETA on the host's card, raise alerts about runs, and open
-[nerdtui](https://github.com/Ndles/nerdtui) on one. A queue card does the same for a sequence of jobs, such as an
+[nerdscope](https://github.com/Ndles/nerdscope) on one. A queue card does the same for a sequence of jobs, such as an
 experiment's runs and their scoring. Any trainer can write them: [training.md](training.md) shows how, with a
 helper to copy ([examples/runcard.py](../examples/runcard.py)). This page is the format itself.
 
@@ -47,7 +47,7 @@ the same directory, then a rename), and never let a failure to write it stop or 
 |---|---|
 | `version` | 1. A card of another version is ignored. |
 | `name` | What to call the run. |
-| `run_dir` | Its directory; nerdfleet opens nerdtui there. |
+| `run_dir` | Its directory; nerdfleet opens nerdscope there. |
 | `metrics` | An absolute path to a file of JSON lines the run appends to. |
 | `step_key`, `loss_key`, `eval_key`, `nonfinite_key` | Which keys of a line hold the step, the training loss, the eval loss and a non-finite marker (1 or true). A line without a numeric `step_key` is not a step (nerdtrain's `{"event": ...}` lines), but an eval line has both. Optional, with these defaults. |
 | `start_step` | The step it starts from: 0, or where a resume or a branch begins. The ETA counts from here. |

@@ -169,7 +169,7 @@ impl HostView {
         }
     }
 
-    /// The run `n` opens nerdtui on: the selected workload's, else the first
+    /// The run `n` opens nerdscope on: the selected workload's, else the first
     /// running one, else the one that ended last.
     pub fn focus_run(&self, workload: Option<usize>) -> Option<&RunInfo> {
         let id = workload.and_then(|i| self.workloads.list.get(i)).map(|w| w.id);

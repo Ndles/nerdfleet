@@ -33,11 +33,11 @@ fn plain(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
 }
 
-/// What the terminal runs to watch a run in nerdtui: in a window of the
+/// What the terminal runs to watch a run in nerdscope: in a window of the
 /// host's nerdmux named after the run, made or gone back to (`--reuse`),
 /// then that nerdmux attached; in a session of its own when no nerdmux
 /// server runs yet; or, with no nerdmux (or `mux` false: the viewer's own
-/// nerdmux is the one on this machine), nerdtui itself. Without nerdtui on
+/// nerdmux is the one on this machine), nerdscope itself. Without nerdscope on
 /// the host it says so and leaves a shell. `None` for a directory or name
 /// with characters these scripts do not pass on.
 pub fn watch_script(run_dir: &str, name: &str, mux: bool) -> Option<String> {
@@ -46,11 +46,12 @@ pub fn watch_script(run_dir: &str, name: &str, mux: bool) -> Option<String> {
     if !plain(run_dir) || !plain(&window) {
         return None;
     }
-    let find_tui = "t=; for n in nerdtui \"$HOME/.local/bin/nerdtui\"; do \
+    // nerdscope was nerdtui: a host not upgraded since has only the old name.
+    let find_tui = "t=; for n in nerdscope \"$HOME/.local/bin/nerdscope\" nerdtui \"$HOME/.local/bin/nerdtui\"; do \
         c=\"$(command -v \"$n\" 2>/dev/null)\" || continue; \
         printf %s \"$c\" | grep -q \"[^A-Za-z0-9/._-]\" && continue; t=$c; break; done; \
-        if [ -z \"$t\" ]; then echo \"nerdfleet: no nerdtui on this host, so the run cannot be watched here. \
-        Install it with: nerdtui --install\"; exec \"${SHELL:-/bin/sh}\" -l; fi; ";
+        if [ -z \"$t\" ]; then echo \"nerdfleet: no nerdscope on this host, so the run cannot be watched here. \
+        Install it with: nerdscope --install\"; exec \"${SHELL:-/bin/sh}\" -l; fi; ";
     let mux_part = "for n in nerdmux \"$HOME/.local/bin/nerdmux\" \"$HOME/.cargo/bin/nerdmux\"; do \
         m=\"$(command -v \"$n\" 2>/dev/null)\" || continue; \
         printf %s \"$m\" | grep -q \"[^A-Za-z0-9/._-]\" && continue; \
@@ -59,7 +60,7 @@ pub fn watch_script(run_dir: &str, name: &str, mux: bool) -> Option<String> {
     Some(format!("d={run_dir}; w={window}; {find_tui}{}exec \"$t\" \"$d\"", if mux { mux_part } else { "" }))
 }
 
-/// Starts a terminal on `host` running nerdtui on the run in `run_dir`.
+/// Starts a terminal on `host` running nerdscope on the run in `run_dir`.
 pub fn open_run<E: From<TerminalEvent> + Send + 'static>(
     host: &Host,
     control_dir: &Path,
@@ -294,7 +295,7 @@ mod tests {
         assert!(text.trim_end().ends_with("-l"), "then a login shell: {text}");
     }
 
-    /// Runs `watch_script` under each `sh`, with fakes for nerdtui and
+    /// Runs `watch_script` under each `sh`, with fakes for nerdscope and
     /// nerdmux in `home`, and returns what each printed.
     fn watch(home: &Path, mux: bool) -> Vec<String> {
         let script = watch_script("/runs/b_s1", "exp/b_s1", mux).unwrap();
@@ -334,21 +335,26 @@ mod tests {
     }
 
     #[test]
-    fn the_watch_script_opens_nerdtui_in_a_nerdmux_window_or_without_one() {
+    fn the_watch_script_opens_nerdscope_in_a_nerdmux_window_or_without_one() {
         let home = std::env::temp_dir().join(format!("nerdfleet-watch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let tui = home.join(".local/bin/nerdtui");
-        // No nerdtui: say so.
-        assert!(watch(&home, true).iter().all(|o| o.contains("no nerdtui on this host")), "{:?}", watch(&home, true));
-        fake(&tui, "echo \"ran nerdtui with [$*]\"");
-        // No nerdmux: nerdtui itself.
-        assert!(watch(&home, true).iter().all(|o| o.contains("ran nerdtui with [/runs/b_s1]")));
+        let tui = home.join(".local/bin/nerdscope");
+        // Neither name: say so.
+        assert!(watch(&home, true).iter().all(|o| o.contains("no nerdscope on this host")), "{:?}", watch(&home, true));
+        // Only the old name, on a host not upgraded since the rename: that one.
+        let old = home.join(".local/bin/nerdtui");
+        fake(&old, "echo \"ran old nerdtui with [$*]\"");
+        assert!(watch(&home, false).iter().all(|o| o.contains("ran old nerdtui with [/runs/b_s1]")));
+        // Both: the new one.
+        fake(&tui, "echo \"ran nerdscope with [$*]\"");
+        // No nerdmux: nerdscope itself.
+        assert!(watch(&home, true).iter().all(|o| o.contains("ran nerdscope with [/runs/b_s1]")));
         fake(
             &home.join(".cargo/bin/nerdmux"),
             "if [ \"$1\" = new-window ]; then [ -e \"$HOME/server\" ] || exit 1; echo \"$*\" >> \"$HOME/log\"; exit 0; fi\n\
              echo \"ran nerdmux with [$*]\"",
         );
-        // nerdmux, no server yet: a session of its own running nerdtui.
+        // nerdmux, no server yet: a session of its own running nerdscope.
         let want = format!("ran nerdmux with [new -- {} /runs/b_s1]", tui.display());
         assert!(watch(&home, true).iter().all(|o| o.contains(&want)), "{:?}", watch(&home, true));
         // A server: a window named after the run, then nerdmux attached.
@@ -357,7 +363,7 @@ mod tests {
         let log = std::fs::read_to_string(home.join("log")).unwrap();
         assert!(log.lines().all(|l| l == format!("new-window -n exp-b_s1 --reuse -- {} /runs/b_s1", tui.display())));
         // The viewer inside nerdmux on this machine: no nerdmux in nerdmux.
-        assert!(watch(&home, false).iter().all(|o| o.contains("ran nerdtui with [/runs/b_s1]")));
+        assert!(watch(&home, false).iter().all(|o| o.contains("ran nerdscope with [/runs/b_s1]")));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

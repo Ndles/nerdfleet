@@ -259,7 +259,7 @@ impl HostUi<'_> {
             ("⏎", "details"),
             ("t", "window"),
             ("s", "terminal"),
-            ("n", "nerdtui"),
+            ("n", "nerdscope"),
             ("z", "zoom"),
             ("Esc", esc),
             ("q", "quit"),
@@ -431,7 +431,7 @@ impl HostUi<'_> {
             _ => {}
         }
         if matches!(self.sel.item(h), Some(Item::Run(_))) && self.sel.section == Section::Runs {
-            hints.push(("n", "nerdtui"));
+            hints.push(("n", "nerdscope"));
         }
         lines.push(Line::from(""));
         lines.push(super::ui::keys_line(t, &hints));
