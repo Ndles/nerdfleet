@@ -4,9 +4,9 @@
 //! is a good thing; capacity (memory, disk) goes from green to yellow to
 //! red as it fills, because a full one is not.
 
-use super::app::HostView;
+use super::app::{HostView, Item};
 use crate::conn::{Retry, State, TRIES};
-use crate::model::{Gpu, GpuInfo, Kind, Power, Vendor, Workload};
+use crate::model::{Gpu, GpuInfo, Kind, Power, QueueInfo, RunInfo, RunStatus, Vendor, Workload};
 use nerdmux::embed::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -26,6 +26,12 @@ const KIND: usize = LABEL + 1;
 const CARD_WORKLOADS: usize = 3;
 /// A training run's GPUs idle this long is called out as possibly stalled.
 pub const STALL_S: u32 = 10 * 60;
+/// Runs listed on a card.
+const CARD_RUNS: usize = 3;
+/// A run that ended this recently still shows on its host's card.
+const RECENT_MS: u64 = 6 * 3600 * 1000;
+/// A run this long without a step is called out on its line.
+pub const QUIET_S: u32 = 5 * 60;
 
 pub struct Ui<'a> {
     pub theme: &'a Theme,
@@ -77,7 +83,8 @@ impl Ui<'_> {
             Span::styled(format!("  {live}/{} live", self.hosts.len()), Style::default().fg(t.status_fg)),
         ]);
         left.render(area, buf);
-        let keys = keys_line(t, &[("←↑↓→", "select"), ("Enter", "open"), ("s", "terminal"), ("q", "quit")]);
+        let keys =
+            keys_line(t, &[("←↑↓→", "select"), ("Enter", "open"), ("s", "terminal"), ("n", "nerdtui"), ("q", "quit")]);
         let w = keys.width() as u16;
         if area.width > w + 20 {
             let r = Rect { x: area.x + area.width - w, width: w, ..area };
@@ -256,6 +263,27 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
             lines.push(gpu_bar_line(t, info, g, bar_w));
         }
 
+        let now = super::app::now_ms();
+        let recent = |ended: u64| ended == 0 || now.saturating_sub(ended) < RECENT_MS;
+        // What the host view shows, without what was hidden there.
+        let items = host.items();
+        let queues = items.iter().filter_map(|i| if let Item::Queue(q) = i { Some(*q) } else { None });
+        for q in queues.filter(|q| q.status == RunStatus::Running || recent(q.updated_ms)).take(1) {
+            lines.push(queue_line(t, q, iw));
+        }
+        let runs: Vec<&RunInfo> = items
+            .iter()
+            .filter_map(|i| if let Item::Run(r) = i { Some(*r) } else { None })
+            .filter(|r| r.status == RunStatus::Running || recent(r.ended_ms))
+            .collect();
+        for r in runs.iter().take(CARD_RUNS) {
+            lines.push(run_line(t, r, iw));
+        }
+        if runs.len() > CARD_RUNS {
+            let more = format!("     +{} more runs · Enter for all", runs.len() - CARD_RUNS);
+            lines.push(Line::from(Span::styled(more, Style::default().fg(t.dim))));
+        }
+
         let work = &host.workloads.list;
         for w in work.iter().take(CARD_WORKLOADS) {
             lines.push(workload_line(t, w, iw));
@@ -317,6 +345,142 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
         lines.push(Line::from(Span::styled(fit(&format!("! {p}"), iw), Style::default().fg(t.yellow))));
     }
     lines
+}
+
+/// `3h 12m`, `12m`, `40s`: a duration to the minute, for ETAs.
+pub fn left(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ => format!("{}h {}m", secs / 3600, secs / 60 % 60),
+    }
+}
+
+/// A moment as local date and time to the minute: `2026-11-14 13:05`.
+pub fn clock(ms: u64) -> String {
+    let t = (ms / 1000).min(i64::MAX as u64) as libc::time_t;
+    // SAFETY: `tm` is plain data, and localtime_r only writes into it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return "-".into();
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
+}
+
+/// A loss, short.
+pub fn loss(v: Option<f32>) -> String {
+    v.map_or("-".into(), |v| if v.abs() >= 100.0 { format!("{v:.0}") } else { format!("{v:.3}") })
+}
+
+/// How far a run is, what its losses are, and what to expect: the right
+/// part of its line.
+fn run_detail(r: &RunInfo) -> String {
+    let steps = if r.max_steps > 0 { format!("{}/{}", r.step, r.max_steps) } else { format!("step {}", r.step) };
+    let mut d = format!("{steps}  loss {}", loss(r.loss));
+    if r.eval.is_some() {
+        d.push_str(&format!("  val {}", loss(r.eval)));
+    }
+    match r.status {
+        RunStatus::Running if r.quiet_s >= QUIET_S => d.push_str(&format!("  no step {}", left(r.quiet_s as u64))),
+        RunStatus::Running => {
+            if let Some(eta) = r.eta_s {
+                d.push_str(&format!("  {} left", left(eta as u64)));
+            }
+        }
+        s => d.push_str(&format!("  {}", s.label())),
+    }
+    if r.nonfinite > 0 {
+        d.push_str(&format!("  NaN×{}", r.nonfinite));
+    }
+    d
+}
+
+/// A run in one line of text (`probe`).
+pub fn run_text(r: &RunInfo) -> String {
+    let mut s = format!("{} · {} · {}", r.name, r.status.label(), run_detail(r));
+    if let Some(tps) = r.tokens_per_s {
+        s.push_str(&format!(" · {} tok/s", si(tps as f64)));
+    }
+    if let Some(st) = r.step_s {
+        s.push_str(&format!(" · {st:.2} s/step"));
+    }
+    s
+}
+
+/// A queue in one line of text.
+pub fn queue_text(q: &QueueInfo) -> String {
+    let mut s = format!("{} · {} · {}/{} done", q.name, q.status.label(), q.done, q.total);
+    if q.failed > 0 {
+        s.push_str(&format!(", {} failed", q.failed));
+    }
+    if !q.current.is_empty() {
+        s.push_str(&format!(" · {}", q.current));
+    }
+    s
+}
+
+/// `86.1k`, `2.40M`.
+pub fn si(v: f64) -> String {
+    match v {
+        v if v >= 1e6 => format!("{:.2}M", v / 1e6),
+        v if v >= 1e3 => format!("{:.1}k", v / 1e3),
+        v => format!("{v:.0}"),
+    }
+}
+
+pub fn run_color(t: &Theme, r: &RunInfo) -> Color {
+    match r.status {
+        RunStatus::Running if r.nonfinite > 0 || r.quiet_s >= QUIET_S => t.yellow,
+        RunStatus::Running => t.magenta,
+        RunStatus::Finished => t.green,
+        RunStatus::Failed | RunStatus::Died => t.red,
+    }
+}
+
+/// A run on a card: its name, then how far it is and what to expect.
+fn run_line<'a>(t: &Theme, r: &RunInfo, iw: usize) -> Line<'a> {
+    let right = run_detail(r);
+    let room = iw.saturating_sub(KIND + right.chars().count() + 1);
+    let name = fit(&r.name, room);
+    let pad = iw.saturating_sub(KIND + name.chars().count() + right.chars().count());
+    let color = run_color(t, r);
+    Line::from(vec![
+        Span::styled(format!("{:<KIND$}", "RUN"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(name, Style::default().fg(t.fg)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right, Style::default().fg(if r.status == RunStatus::Running { t.fg } else { color })),
+    ])
+}
+
+/// A queue on a card: its name, how many of its jobs are done, and what it
+/// is doing now.
+fn queue_line<'a>(t: &Theme, q: &QueueInfo, iw: usize) -> Line<'a> {
+    let mut right = format!("{}/{} done", q.done, q.total);
+    if q.failed > 0 {
+        right.push_str(&format!(" · {} failed", q.failed));
+    }
+    if q.status != RunStatus::Running {
+        right.push_str(&format!(" · {}", q.status.label()));
+    }
+    let color = match q.status {
+        RunStatus::Running if q.failed > 0 => t.yellow,
+        RunStatus::Running => t.cyan,
+        RunStatus::Finished => t.green,
+        _ => t.red,
+    };
+    let mut name = q.name.clone();
+    if !q.current.is_empty() {
+        name.push_str(&format!(" · {}", q.current));
+    }
+    let room = iw.saturating_sub(KIND + right.chars().count() + 1);
+    let name = fit(&name, room);
+    let pad = iw.saturating_sub(KIND + name.chars().count() + right.chars().count());
+    Line::from(vec![
+        Span::styled(format!("{:<KIND$}", "QUEUE"), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(name, Style::default().fg(t.fg)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right, Style::default().fg(t.dim)),
+    ])
 }
 
 pub fn kind_color(t: &Theme, k: Kind) -> Color {

@@ -4,7 +4,7 @@
 //! many viewers as connect, and for nobody.
 
 use super::alerts::{self, Engine};
-use super::{gpu, linux, procs, workload};
+use super::{gpu, linux, procs, runs, workload};
 use crate::history::{self, History};
 use crate::model::{AgentMsg, Alert, Inventory, Sample, Workloads};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,6 +21,7 @@ pub struct Core {
     net: linux::NetIo,
     scanner: procs::Scanner,
     tracker: workload::Tracker,
+    runs: runs::Tracker,
     pub history: History,
     pub alerts: Engine,
     inventory: Inventory,
@@ -47,6 +48,7 @@ impl Core {
             net: Default::default(),
             scanner: Default::default(),
             tracker: Default::default(),
+            runs: Default::default(),
             history,
             alerts: Engine::with_log(log),
             inventory: Inventory::default(),
@@ -147,9 +149,12 @@ impl Core {
         };
         let (list, top) = self.tracker.update(&input);
         let running = |pid: u32, started_s: u64| procs.iter().any(|p| p.pid == pid && p.started_s == started_s);
-        let new_alerts = self.alerts.workloads(time_ms, &list, &ports, &running, alerts::oom_kills());
+        let mut new_alerts = self.alerts.workloads(time_ms, &list, &ports, &running, alerts::oom_kills());
+        let (runs, notes) = self.runs.update(time_ms, &procs, &list);
+        new_alerts.extend(self.alerts.runs(time_ms, notes));
         self.detailed = detail;
         out.push(AgentMsg::Workloads(Workloads { list, top }));
+        out.push(AgentMsg::Runs(runs));
         if !new_alerts.is_empty() {
             out.push(AgentMsg::Alerts(new_alerts));
         }

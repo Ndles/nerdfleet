@@ -98,7 +98,7 @@ fn a_viewer_attaches_to_the_resident_agent_and_its_state_is_saved() {
 
 /// Starts `agent --stdio` beside a resident of another protocol and returns
 /// what the agent tells the viewer about it.
-fn told_about(name: &str, version: &str) -> AgentMsg {
+fn told_about(name: &str, protocol: u32, version: &str) -> AgentMsg {
     use nerdfleet::model::Hello;
     use std::os::unix::net::UnixListener;
     let run = scratch(&format!("{name}-run"));
@@ -106,9 +106,8 @@ fn told_about(name: &str, version: &str) -> AgentMsg {
     let dir = run.join("nerdfleet");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    // It says hello in protocol 2.
     let listener = UnixListener::bind(dir.join("agent.sock")).unwrap();
-    let hello = Hello { protocol: 2, version: version.into(), target: "x86_64-linux".into(), resident: true };
+    let hello = Hello { protocol, version: version.into(), target: "x86_64-linux".into(), resident: true };
     let other = std::thread::spawn(move || {
         let (mut s, _) = listener.accept().unwrap();
         write_frame(&mut s, &Frame { route: vec![], msg: AgentMsg::Hello(hello) }).unwrap();
@@ -131,8 +130,11 @@ fn told_about(name: &str, version: &str) -> AgentMsg {
 
 #[test]
 fn a_resident_of_another_protocol_is_left_alone_and_the_viewer_is_told() {
-    assert_eq!(told_about("old", "0.0.9"), AgentMsg::OldResident("0.0.9".into()));
+    assert_eq!(told_about("old", 2, "0.0.9"), AgentMsg::OldResident("0.0.9".into()));
+    // An earlier protocol is older whatever its version says, and `u` replaces it.
+    let same = env!("CARGO_PKG_VERSION");
+    assert_eq!(told_about("same", PROTOCOL_VERSION - 1, same), AgentMsg::OldResident(same.into()));
     // A newer one is not called out of date, and no update is offered.
-    let AgentMsg::Error(e) = told_about("new", "999.0.0") else { panic!("not told") };
+    let AgentMsg::Error(e) = told_about("new", PROTOCOL_VERSION + 1, "999.0.0") else { panic!("not told") };
     assert!(e.contains("another build") && e.contains("update this nerdfleet"), "{e}");
 }

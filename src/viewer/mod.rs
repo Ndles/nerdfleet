@@ -30,11 +30,11 @@ pub use pick::pick;
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Overview,
-    /// One host up close, with a workload selected.
+    /// One host up close, with a line of one of its lists selected.
     Host {
         host: usize,
-        workload: usize,
         window: usize,
+        sel: host::Sel,
     },
 }
 
@@ -243,6 +243,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             h.read_up_to = id;
         }
     }
+    app::load_hidden(&mut hosts);
 
     let screen = Screen::enter()?;
     let mut term = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
@@ -341,10 +342,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                             let up = m.kind == MouseEventKind::ScrollUp;
                             let width = layout(area, panes).0.map_or(area.width, |d| d.width);
                             match &mut mode {
-                                Mode::Host { host, workload, .. } => {
-                                    let last = hosts[*host].workloads.list.len().saturating_sub(1);
-                                    *workload = if up { workload.saturating_sub(1) } else { (*workload + 1).min(last) };
-                                }
+                                Mode::Host { host, sel, .. } => sel.step(&hosts[*host], !up),
                                 Mode::Overview => {
                                     let cols = cols(width, hosts.len());
                                     if up {
@@ -409,6 +407,38 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         show_host(&mut mode, &shared, in_view);
                         continue;
                     }
+                    // `n`: nerdtui on the host's run (the selected workload's, else
+                    // the one training), in that host's terminal: a window of its
+                    // nerdmux, so it keeps running when the terminal goes.
+                    if k.code == KeyCode::Char('n') && k.modifiers.is_empty() && !hosts.is_empty() {
+                        let run = match mode {
+                            Mode::Host { host, sel, .. } if host == in_view => sel.run_to_open(&hosts[host]),
+                            _ => hosts[in_view].focus_run(None),
+                        };
+                        let Some(run) = run.cloned() else { continue };
+                        let next = Panes { term: Some(in_view), zoom: false, focus: true };
+                        let size = term_size(&term, next)?;
+                        next_shell += 1;
+                        let opened = shell::open_run(
+                            &config.hosts[in_view],
+                            &control_dir,
+                            next_shell,
+                            size,
+                            wake_tx.clone(),
+                            &run.run_dir,
+                            &run.name,
+                        );
+                        match opened {
+                            Ok(s) => shells[in_view] = Some(s),
+                            Err(e) => {
+                                hosts[in_view].apply(crate::model::AgentMsg::Error(format!("nerdtui: {e}")));
+                                continue;
+                            }
+                        }
+                        panes = next;
+                        show_host(&mut mode, &shared, in_view);
+                        continue;
+                    }
                     // Ctrl+]: the keys back to the terminal beside.
                     if shell::is_escape(&k) {
                         panes.focus = panes.term.is_some();
@@ -430,21 +460,59 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         }
                         continue;
                     }
-                    if let Mode::Host { host, workload, window } = mode {
-                        let n = hosts[host].workloads.list.len();
+                    if let Mode::Host { host, window, mut sel } = mode {
+                        let h = &mut hosts[host];
+                        let mut hidden_changed = false;
                         match k.code {
+                            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left if sel.detail => sel.detail = false,
                             KeyCode::Esc | KeyCode::Backspace | KeyCode::Left => {
                                 shared.set_detail(host, false);
                                 mode = Mode::Overview;
+                                continue;
                             }
-                            KeyCode::Up => mode = Mode::Host { host, workload: workload.saturating_sub(1), window },
-                            KeyCode::Down => {
-                                mode = Mode::Host { host, workload: (workload + 1).min(n.saturating_sub(1)), window }
+                            KeyCode::Tab => sel.cycle(h, false),
+                            KeyCode::BackTab => sel.cycle(h, true),
+                            KeyCode::Up => sel.step(h, false),
+                            KeyCode::Down => sel.step(h, true),
+                            KeyCode::Enter | KeyCode::Right => {
+                                sel.detail = !sel.detail && sel.section != host::Section::Workloads
                             }
                             KeyCode::Char('t') => {
-                                mode = Mode::Host { host, workload, window: (window + 1) % host::WINDOWS.len() }
+                                mode = Mode::Host { host, sel, window: (window + 1) % host::WINDOWS.len() };
+                                continue;
+                            }
+                            // `x`: away with the selected run or alert; `X` every
+                            // run that ended, `c` every alert, `H` shows the runs again.
+                            KeyCode::Char('x') | KeyCode::Delete => match sel.section {
+                                host::Section::Runs => {
+                                    if let Some((key, started)) =
+                                        sel.item(h).map(|i| (i.key().to_string(), i.started_ms()))
+                                    {
+                                        hidden_changed = h.hide(&key, started);
+                                    }
+                                }
+                                host::Section::Alerts => {
+                                    if let Some(id) = sel.alert(h).map(|a| a.id) {
+                                        hidden_changed = h.dismiss(id);
+                                    }
+                                }
+                                host::Section::Workloads => {}
+                            },
+                            KeyCode::Char('X') if sel.section == host::Section::Runs => {
+                                hidden_changed = h.hide_ended() > 0;
+                                sel.detail = false;
+                            }
+                            KeyCode::Char('H') if sel.section == host::Section::Runs => hidden_changed = h.unhide_all(),
+                            KeyCode::Char('c') if sel.section == host::Section::Alerts => {
+                                hidden_changed = h.clear_alerts();
                             }
                             _ => {}
+                        }
+                        sel.clamp(h);
+                        mode = Mode::Host { host, window, sel };
+                        if hidden_changed {
+                            app::save_hidden(&hosts);
+                            app::save_read(&hosts);
                         }
                         continue;
                     }
@@ -452,7 +520,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         // Looking closely: ask that host for command lines and
                         // its busiest processes.
                         shared.set_detail(selected, true);
-                        mode = Mode::Host { host: selected, workload: 0, window: 0 };
+                        mode = Mode::Host { host: selected, window: 0, sel: host::Sel::new(&hosts[selected]) };
                         continue;
                     }
                     // Arrows move, with or without Alt (nerdmux's pane keys).
@@ -522,6 +590,10 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
             app::save_read(&hosts);
             dirty = true;
         }
+        // Lists change under the selection: runs end and re-sort, alerts arrive.
+        if let Mode::Host { host, sel, .. } = &mut mode {
+            sel.clamp(&hosts[*host]);
+        }
         // Countdowns on down hosts tick even when nothing arrives.
         let due = dirty && last_draw.elapsed() >= FRAME || last_draw.elapsed() > Duration::from_secs(1);
         if !due {
@@ -535,14 +607,10 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
                         ui::Ui { theme: &theme, hosts: &hosts, selected, scroll: &mut scroll, config_path }
                             .draw(area, f.buffer_mut())
                     }
-                    Mode::Host { host, workload, window } => host::HostUi {
-                        theme: &theme,
-                        host: &hosts[host],
-                        selected: workload,
-                        own_bg: theme.own_palette,
-                        window,
+                    Mode::Host { host, window, sel } => {
+                        host::HostUi { theme: &theme, host: &hosts[host], sel, own_bg: theme.own_palette, window }
+                            .draw(area, f.buffer_mut())
                     }
-                    .draw(area, f.buffer_mut()),
                 }
             }
             let (Some(area), Some(host)) = (pane, panes.term) else { return };
@@ -579,7 +647,7 @@ pub fn run(config_path: &Path) -> anyhow::Result<()> {
 fn show_host(mode: &mut Mode, shared: &Shared, host: usize) {
     if !matches!(*mode, Mode::Host { host: h, .. } if h == host) {
         shared.set_detail(host, true);
-        *mode = Mode::Host { host, workload: 0, window: 0 };
+        *mode = Mode::Host { host, window: 0, sel: host::Sel::default() };
     }
 }
 
@@ -679,7 +747,7 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
                         "the resident agent here is version {v}, too old for this viewer: \
                          `nerdfleet resident enable` updates it"
                     ),
-                    AgentMsg::Inventory(_) | AgentMsg::Workloads(_) | AgentMsg::History(_) => {}
+                    AgentMsg::Inventory(_) | AgentMsg::Workloads(_) | AgentMsg::History(_) | AgentMsg::Runs(_) => {}
                     AgentMsg::Alerts(a) => {
                         for a in a {
                             println!("alert {}", a.message);
@@ -755,6 +823,13 @@ pub fn probe(config_path: &Path, name: &str) -> anyhow::Result<()> {
             if w.gpu_idle_s > 0 { format!(" · GPUs idle {}s", w.gpu_idle_s) } else { String::new() },
         );
         println!("     $ {}", w.cmdline);
+    }
+    for r in &view.runs.runs {
+        println!("run  {}", ui::run_text(r));
+        println!("     {} · series {} points, {} evals", r.run_dir, r.series.len(), r.evals.len());
+    }
+    for q in &view.runs.queues {
+        println!("queue {}", ui::queue_text(q));
     }
     for p in &view.workloads.top {
         let job = view.workloads.list.iter().find(|w| p.job != 0 && w.id == p.job).map_or("-", |w| w.label.as_str());
@@ -990,7 +1065,8 @@ mod tests {
         let theme = nerdmux::embed::Theme::default();
         let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);
-        super::host::HostUi { theme: &theme, host: &v, selected: 0, own_bg: false, window: 0 }.draw(area, &mut buf);
+        super::host::HostUi { theme: &theme, host: &v, sel: Default::default(), own_bg: false, window: 0 }
+            .draw(area, &mut buf);
         let bar: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(bar.contains("u updates it"), "{bar}");
         // Not while it is away, and not for a new one or one of the viewer's own age.

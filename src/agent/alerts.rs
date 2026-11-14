@@ -84,6 +84,15 @@ impl Engine {
         out.push(alert);
     }
 
+    /// Alerts about runs, decided by `runs::Tracker`.
+    pub fn runs(&mut self, time_ms: u64, notes: Vec<super::runs::Note>) -> Vec<Alert> {
+        let mut out = Vec::new();
+        for n in notes {
+            self.raise(time_ms, n.kind, &n.subject, n.message, &mut out);
+        }
+        out
+    }
+
     /// Checks a sample: disks and GPUs.
     pub fn sample(&mut self, inv: &Inventory, s: &Sample) -> Vec<Alert> {
         let mut out = Vec::new();

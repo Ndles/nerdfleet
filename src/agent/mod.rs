@@ -5,7 +5,9 @@
 //! viewer to that one instead. In resident mode (`agent --resident`) it
 //! keeps sampling as a user service; see `resident`.
 //!
-//! It only reads: `/proc`, `/sys` and the GPU libraries. It never listens
+//! It only reads: `/proc`, `/sys`, the GPU libraries, and the run cards in
+//! `~/.local/state/runcards` with the metrics files they name, when those are
+//! regular files of the agent's own user (docs/runcards.md). It never listens
 //! on a network socket and never reads another process's environment.
 
 #[cfg(target_os = "linux")]
@@ -20,6 +22,8 @@ mod linux;
 mod procs;
 #[cfg(target_os = "linux")]
 pub mod resident;
+#[cfg(target_os = "linux")]
+mod runs;
 #[cfg(target_os = "linux")]
 mod workload;
 
@@ -105,7 +109,11 @@ pub fn run_stdio() -> anyhow::Result<()> {
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     send(&mut out, AgentMsg::Hello(hello(false)))?;
     if let Some(h) = mismatch {
-        let msg = if crate::model::older(&h.version, env!("CARGO_PKG_VERSION")) {
+        // Protocols only grow: a resident speaking an earlier one is older, whatever its version says
+        // (a protocol can change between releases), and `u` replaces it.
+        let older =
+            h.protocol < crate::proto::PROTOCOL_VERSION || crate::model::older(&h.version, env!("CARGO_PKG_VERSION"));
+        let msg = if older {
             AgentMsg::OldResident(h.version)
         } else {
             AgentMsg::Error(format!(

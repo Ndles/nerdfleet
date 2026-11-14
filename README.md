@@ -29,9 +29,9 @@ watches Linux hosts). Each one includes the agents for x86_64 and aarch64 Linux,
 reaches RHEL 8-era machines and ARM boxes too.
 
 ```sh
-f=nerdfleet-0.2.2-x86_64-linux     # or -aarch64-linux, -aarch64-macos
-curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.2/$f
-curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.2/$f.sha256
+f=nerdfleet-0.2.3-x86_64-linux     # or -aarch64-linux, -aarch64-macos
+curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.3/$f
+curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.3/$f.sha256
 sha256sum -c $f.sha256
 install -m 755 $f ~/.local/bin/nerdfleet
 ```
@@ -95,18 +95,50 @@ nerdfleet probe gpu-box   # connect to one host and print what it reports
 |---------------------------------------------|-------------------------------|
 | move between hosts                          | `←` `↓` `↑` `→`               |
 | open a host: graphs, workloads, processes   | `Enter`, and `Esc` to go back |
+| in a host: move between runs, workloads and alerts | `Tab`, then `↑` `↓` to select |
+| a run, queue or alert in full                | `Enter`, and `Esc` to close  |
+| hide an ended run, or all of them            | `x`, `X` (`H` shows them again) |
+| dismiss an alert, or clear them all          | `x`, `c`                     |
 | switch the graphs between 15m, 6h and 24h   | `t`                           |
 | a terminal on the host, beside its stats    | `s`, and `s` again to put it away |
 | that terminal on the whole screen           | `z`                           |
 | move the keys between dashboard and terminal | `Ctrl+]`                     |
 | try a host that went away again             | `r`                           |
 | update a resident agent older than nerdfleet | `u`                          |
+| watch the host's training run in nerdtui     | `n`                          |
 | quit                                        | `q`                           |
 
 Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
 (`CPU`), named the way you would name them (`torchrun train.py`, `llama-swap · Qwen3-8B-Q4_K_M`). The host view adds
 graphs, every GPU in full, each workload's models, processes and command line (with keys and passwords masked on the
 host), and the busiest processes.
+
+## Training runs
+
+A training run that writes a [run card](docs/runcards.md), as nerdtrain's do, shows on its host's card as a `RUN`
+line: its name, step of steps, training and eval loss, and the time left at its recent pace. A queue of runs (an
+experiment, say) shows as a `QUEUE` line with how many of its jobs are done and what it is doing now. The host view
+lists them all, with each run's loss curve so far, its pace, and where it lives. Their news comes as alerts: a
+non-finite loss, a run that stops making steps while its process lives, one that finishes or fails, and one whose
+process is gone before its last step.
+
+`n` opens [nerdtui](https://github.com/Ndles/nerdtui) on the run, in the host's terminal: in a window of its nerdmux
+named after the run, so it keeps running when you put the terminal away and the next `n` comes back to it. nerdtui
+runs on the host and reads the run's files there; the host needs nerdtui installed (`nerdtui --install`). In the
+host view `n` picks the selected run, or with the workloads selected the selected workload's run, marked `▶`;
+elsewhere, the run that is training.
+
+In the host view, `Tab` moves the keys between the runs, the workloads and the alerts, and `↑` `↓` select within
+them. `Enter` opens the selected run in full: its steps, when it started and ended and how long it took, its pace,
+its lowest loss and eval with their curves, its directory and its card. `x` hides a run that is no longer running
+and `X` every one of them, so the list keeps to what matters; `H` shows them again, and a hidden run that runs again
+(a resume in the same directory) shows by itself. In the alerts, `Enter` shows one in full, `x` dismisses it and `c`
+clears them all. Hiding and clearing happen in nerdfleet only: the host keeps its cards and its alert log, and
+nerdfleet remembers what you put away between sessions.
+
+[docs/training.md](docs/training.md) shows how to set it up for your own trainer: a stand-alone Python helper
+([examples/runcard.py](examples/runcard.py)) that writes the metrics and the card, hooks for PyTorch Lightning
+and the Hugging Face Trainer, and what to check when a run does not show.
 
 ## Terminals
 
@@ -120,7 +152,7 @@ outlined, as nerdmux outlines its focused pane. `s` again puts the terminal away
 screen. A terminal whose program ends closes by itself. Hosts cannot set this machine's clipboard or ring its bell.
 
 The mouse works too. A click moves the keys to the half it lands in, and the wheel scrolls whatever is under the
-pointer: the terminal's program or scrollback, the selected host, or the selected workload. Clicks and drags in a
+pointer: the terminal's program or scrollback, the selected host, or the selected line of the host view. Clicks and drags in a
 terminal go to its program. Since nerdfleet takes the mouse, your own terminal selects text with `Shift` held down,
 which is also how to copy from a host's terminal: what its nerdmux copies stays on the host.
 
@@ -147,8 +179,9 @@ history and alerts stay. Running `enable` again does the same.
   and host keys all come from `~/.ssh/config`. The config file has no place for passwords, tokens or keys. One SSH
   connection per host is shared by everything nerdfleet opens there, so a password or second factor is asked once.
 - **No ports, no daemons, no root.** On first contact nerdfleet copies its agent to `~/.cache/nerdfleet/` on the host
-  (mode 700, checked against its SHA-256 before every start). It runs as you, only reads `/proc`, `/sys` and the GPU
-  drivers, and exits when you quit, unless you made it resident.
+  (mode 700, checked against its SHA-256 before every start). It runs as you, only reads `/proc`, `/sys`, the GPU
+  drivers and your own [run cards](docs/runcards.md) with the metrics files they name, and exits when you quit, unless
+  you made it resident.
 - **Hosts are not trusted.** Everything an agent sends is size-limited and cleaned of escape sequences before it is
   drawn, so a compromised machine cannot take over the terminal that watches it.
 - **It gives up politely.** A host that goes away is tried 8 times over about three minutes, and its card says which
