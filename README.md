@@ -105,7 +105,7 @@ nerdfleet probe gpu-box   # connect to one host and print what it reports
 | move the keys between dashboard and terminal | `Ctrl+]`                     |
 | try a host that went away again             | `r`                           |
 | update a resident agent older than nerdfleet | `u`                          |
-| watch the host's training run in nerdtui     | `n`                          |
+| watch the host's training run in nerdscope  | `n`                           |
 | quit                                        | `q`                           |
 
 Each card lists what the host is doing: model servers (`INFR`), GPU jobs (`TRAIN`) and jobs keeping the CPUs busy
@@ -122,9 +122,9 @@ lists them all, with each run's loss curve so far, its pace, and where it lives.
 non-finite loss, a run that stops making steps while its process lives, one that finishes or fails, and one whose
 process is gone before its last step.
 
-`n` opens [nerdtui](https://github.com/Ndles/nerdtui) on the run, in the host's terminal: in a window of its nerdmux
-named after the run, so it keeps running when you put the terminal away and the next `n` comes back to it. nerdtui
-runs on the host and reads the run's files there; the host needs nerdtui installed (`nerdtui --install`). In the
+`n` opens [nerdscope](https://github.com/Ndles/nerdscope) on the run, in the host's terminal: in a window of its nerdmux
+named after the run, so it keeps running when you put the terminal away and the next `n` comes back to it. nerdscope
+runs on the host and reads the run's files there; the host needs nerdscope installed (`nerdscope --install`). In the
 host view `n` picks the selected run, or with the workloads selected the selected workload's run, marked `▶`;
 elsewhere, the run that is training.
 

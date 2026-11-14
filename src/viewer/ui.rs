@@ -84,7 +84,7 @@ impl Ui<'_> {
         ]);
         left.render(area, buf);
         let keys =
-            keys_line(t, &[("←↑↓→", "select"), ("Enter", "open"), ("s", "terminal"), ("n", "nerdtui"), ("q", "quit")]);
+            keys_line(t, &[("←↑↓→", "select"), ("Enter", "open"), ("s", "terminal"), ("n", "nerdscope"), ("q", "quit")]);
         let w = keys.width() as u16;
         if area.width > w + 20 {
             let r = Rect { x: area.x + area.width - w, width: w, ..area };
