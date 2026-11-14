@@ -29,9 +29,9 @@ watches Linux hosts). Each one includes the agents for x86_64 and aarch64 Linux,
 reaches RHEL 8-era machines and ARM boxes too.
 
 ```sh
-f=nerdfleet-0.2.4-x86_64-linux     # or -aarch64-linux, -aarch64-macos
-curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.4/$f
-curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.4/$f.sha256
+f=nerdfleet-0.2.5-x86_64-linux     # or -aarch64-linux, -aarch64-macos
+curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.5/$f
+curl -fLO https://github.com/Ndles/nerdfleet/releases/download/v0.2.5/$f.sha256
 sha256sum -c $f.sha256
 install -m 755 $f ~/.local/bin/nerdfleet
 ```
