@@ -112,13 +112,16 @@ states, and what it is doing now. The card then has a `QUEUE` line with how many
 - **The host's card:** a `RUN` line per run that is training or ended in the last six hours, a `QUEUE` line,
   then the usual workloads. Yellow: no step for five minutes, or a non-finite loss. Red: failed, or died.
 - **The host view** (`Enter`): every run with its loss curve so far, its pace, its eval step and its directory.
-  `▶` marks the run `n` opens: the selected workload's, else the one training.
+  `Tab` gives the keys to the runs, `↑` `↓` select one and `Enter` shows it in full (start, end, duration, lowest
+  loss and eval, its card); `x` hides an ended run, `X` all of them, `H` shows them again. `▶` marks the run `n`
+  opens: the selected one, else the selected workload's, else the one training.
 - **`n`:** nerdtui on that run, on the host, in the host's terminal (`Ctrl+]` back to the dashboard, `s` puts the
   terminal away, and nerdtui keeps running in its nerdmux window).
 - **Alerts:** a non-finite loss; no new step for ten minutes and ten times the usual step time while the
   process lives; a run that finishes or fails; a run whose process is gone before its last step ("died",
   which is what a crash looks like, since a crashed run cannot say so). A resident agent raises them whether or
-  not nerdfleet is open; nerdfleet shows them on the card and as desktop notifications.
+  not nerdfleet is open; nerdfleet shows them on the card and as desktop notifications. In the host view, `x`
+  dismisses the selected alert and `c` clears them all, in nerdfleet only.
 
 ## When something does not show
 

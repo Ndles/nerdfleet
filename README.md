@@ -95,6 +95,10 @@ nerdfleet probe gpu-box   # connect to one host and print what it reports
 |---------------------------------------------|-------------------------------|
 | move between hosts                          | `←` `↓` `↑` `→`               |
 | open a host: graphs, workloads, processes   | `Enter`, and `Esc` to go back |
+| in a host: move between runs, workloads and alerts | `Tab`, then `↑` `↓` to select |
+| a run, queue or alert in full                | `Enter`, and `Esc` to close  |
+| hide an ended run, or all of them            | `x`, `X` (`H` shows them again) |
+| dismiss an alert, or clear them all          | `x`, `c`                     |
 | switch the graphs between 15m, 6h and 24h   | `t`                           |
 | a terminal on the host, beside its stats    | `s`, and `s` again to put it away |
 | that terminal on the whole screen           | `z`                           |
@@ -121,7 +125,16 @@ process is gone before its last step.
 `n` opens [nerdtui](https://github.com/Ndles/nerdtui) on the run, in the host's terminal: in a window of its nerdmux
 named after the run, so it keeps running when you put the terminal away and the next `n` comes back to it. nerdtui
 runs on the host and reads the run's files there; the host needs nerdtui installed (`nerdtui --install`). In the
-host view `n` picks the selected workload's run, marked `▶`; elsewhere, the run that is training.
+host view `n` picks the selected run, or with the workloads selected the selected workload's run, marked `▶`;
+elsewhere, the run that is training.
+
+In the host view, `Tab` moves the keys between the runs, the workloads and the alerts, and `↑` `↓` select within
+them. `Enter` opens the selected run in full: its steps, when it started and ended and how long it took, its pace,
+its lowest loss and eval with their curves, its directory and its card. `x` hides a run that is no longer running
+and `X` every one of them, so the list keeps to what matters; `H` shows them again, and a hidden run that runs again
+(a resume in the same directory) shows by itself. In the alerts, `Enter` shows one in full, `x` dismisses it and `c`
+clears them all. Hiding and clearing happen in nerdfleet only: the host keeps its cards and its alert log, and
+nerdfleet remembers what you put away between sessions.
 
 [docs/training.md](docs/training.md) shows how to set it up for your own trainer: a stand-alone Python helper
 ([examples/runcard.py](examples/runcard.py)) that writes the metrics and the card, hooks for PyTorch Lightning
@@ -139,7 +152,7 @@ outlined, as nerdmux outlines its focused pane. `s` again puts the terminal away
 screen. A terminal whose program ends closes by itself. Hosts cannot set this machine's clipboard or ring its bell.
 
 The mouse works too. A click moves the keys to the half it lands in, and the wheel scrolls whatever is under the
-pointer: the terminal's program or scrollback, the selected host, or the selected workload. Clicks and drags in a
+pointer: the terminal's program or scrollback, the selected host, or the selected line of the host view. Clicks and drags in a
 terminal go to its program. Since nerdfleet takes the mouse, your own terminal selects text with `Shift` held down,
 which is also how to copy from a host's terminal: what its nerdmux copies stays on the host.
 

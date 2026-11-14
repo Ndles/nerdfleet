@@ -246,6 +246,24 @@ pub enum AlertKind {
     RunDied,
 }
 
+impl AlertKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AlertKind::TrainingStalled => "training stalled",
+            AlertKind::WorkloadEnded => "workload ended",
+            AlertKind::StoppedListening => "stopped listening",
+            AlertKind::DiskFull => "disk full",
+            AlertKind::GpuThrottled => "GPU throttled",
+            AlertKind::GpuMemoryFull => "GPU memory full",
+            AlertKind::HostUnreachable => "host unreachable",
+            AlertKind::RunNonfinite => "non-finite loss",
+            AlertKind::RunStalled => "run stalled",
+            AlertKind::RunEnded => "run ended",
+            AlertKind::RunDied => "run died",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Alert {
     /// Unique per host, and growing: milliseconds since the epoch times a

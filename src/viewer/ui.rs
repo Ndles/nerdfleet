@@ -4,7 +4,7 @@
 //! is a good thing; capacity (memory, disk) goes from green to yellow to
 //! red as it fills, because a full one is not.
 
-use super::app::HostView;
+use super::app::{HostView, Item};
 use crate::conn::{Retry, State, TRIES};
 use crate::model::{Gpu, GpuInfo, Kind, Power, QueueInfo, RunInfo, RunStatus, Vendor, Workload};
 use nerdmux::embed::Theme;
@@ -265,11 +265,17 @@ fn card_lines<'a>(t: &Theme, host: &'a HostView, width: u16) -> Vec<Line<'a>> {
 
         let now = super::app::now_ms();
         let recent = |ended: u64| ended == 0 || now.saturating_sub(ended) < RECENT_MS;
-        for q in host.runs.queues.iter().filter(|q| q.status == RunStatus::Running || recent(q.updated_ms)).take(1) {
+        // What the host view shows, without what was hidden there.
+        let items = host.items();
+        let queues = items.iter().filter_map(|i| if let Item::Queue(q) = i { Some(*q) } else { None });
+        for q in queues.filter(|q| q.status == RunStatus::Running || recent(q.updated_ms)).take(1) {
             lines.push(queue_line(t, q, iw));
         }
-        let runs: Vec<&RunInfo> =
-            host.runs.runs.iter().filter(|r| r.status == RunStatus::Running || recent(r.ended_ms)).collect();
+        let runs: Vec<&RunInfo> = items
+            .iter()
+            .filter_map(|i| if let Item::Run(r) = i { Some(*r) } else { None })
+            .filter(|r| r.status == RunStatus::Running || recent(r.ended_ms))
+            .collect();
         for r in runs.iter().take(CARD_RUNS) {
             lines.push(run_line(t, r, iw));
         }
@@ -348,6 +354,17 @@ pub fn left(secs: u64) -> String {
         60..3600 => format!("{}m", secs / 60),
         _ => format!("{}h {}m", secs / 3600, secs / 60 % 60),
     }
+}
+
+/// A moment as local date and time to the minute: `2026-11-14 13:05`.
+pub fn clock(ms: u64) -> String {
+    let t = (ms / 1000).min(i64::MAX as u64) as libc::time_t;
+    // SAFETY: `tm` is plain data, and localtime_r only writes into it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return "-".into();
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
 }
 
 /// A loss, short.
