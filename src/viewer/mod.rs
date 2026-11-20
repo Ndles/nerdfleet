@@ -684,10 +684,18 @@ fn open_shell(
 /// was read; it goes to `notify-send` as an argument, never through a
 /// shell, with markup characters escaped (notification daemons render
 /// Pango markup, and a workload's label is whatever its command line said).
+/// It goes away after 8 seconds, whatever the daemon's default; the alert
+/// stays in the host's view.
 fn notify(host: &str, message: &str) {
     use std::process::{Command, Stdio};
     let _ = Command::new("notify-send")
-        .args(["--app-name=nerdfleet", "--", &format!("nerdfleet · {}", markup_escape(host)), &markup_escape(message)])
+        .args([
+            "--app-name=nerdfleet",
+            "--expire-time=8000",
+            "--",
+            &format!("nerdfleet · {}", markup_escape(host)),
+            &markup_escape(message),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -225,6 +225,10 @@ pub fn run() -> anyhow::Result<()> {
             core.work_now();
         }
         for msg in core.tick(detail) {
+            // New alerts only: the saved log newcomers get is not news.
+            if let AgentMsg::Alerts(new) = &msg {
+                super::notify::post(new);
+            }
             let full = frame(&msg);
             let plain = without_detail(&msg).map(|m| frame(&m));
             for c in &clients {

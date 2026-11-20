@@ -69,6 +69,11 @@ pub fn private_dir(dir: &Path) -> anyhow::Result<PathBuf> {
 /// followed, so dotfiles managed with stow or similar still work, and the
 /// file they point to is what is checked.
 pub fn check_owned(path: &Path) -> anyhow::Result<()> {
+    check_owned_as(path, "the config file")
+}
+
+/// `check_owned`, naming the file `what` when it refuses.
+pub fn check_owned_as(path: &Path, what: &str) -> anyhow::Result<()> {
     let check = |p: &Path, what: &str| -> anyhow::Result<()> {
         let meta = std::fs::metadata(p)?;
         if meta.uid() != uid() || meta.mode() & 0o022 != 0 {
@@ -80,7 +85,7 @@ pub fn check_owned(path: &Path) -> anyhow::Result<()> {
         Ok(())
     };
     let real = std::fs::canonicalize(path)?;
-    check(&real, "the config file")?;
+    check(&real, what)?;
     if let Some(dir) = real.parent() {
         check(dir, "the directory of")?;
     }

@@ -173,6 +173,23 @@ stops at your last logout unless lingering is on for your user; `enable` tells y
 would run. After you update nerdfleet, a resident agent older than it says so on its card, and `u` updates it; its
 history and alerts stay. Running `enable` again does the same.
 
+To get the alerts on your phone or in chat while nerdfleet is closed, put an executable `~/.config/nerdfleet/on-alert`
+on the host. The resident agent runs it once per new alert, with the alert in environment variables:
+
+```sh
+#!/bin/sh
+exec curl -fsS -m 15 -H "Title: $NERDFLEET_HOST: $NERDFLEET_ALERT_KIND" \
+    -d "$NERDFLEET_ALERT_MESSAGE" https://ntfy.sh/your-private-topic > /dev/null
+```
+
+`NERDFLEET_HOST` is the host's name in your config; `NERDFLEET_HOSTNAME` (the machine's own name),
+`NERDFLEET_ALERT_SUBJECT`, `NERDFLEET_ALERT_TIME` (Unix seconds) and `NERDFLEET_ALERT_ID` are set too. The hook stays
+on the host, so a webhook URL or topic never passes through nerdfleet, and it must be yours and writable only by you.
+`nerdfleet resident test-alert gpu-box` sends a test alert through it. The agent itself has no network access: it
+leaves each alert in an outbox, and a second user service (`nerdfleet-notify`) runs the hook, which is cut off after
+20 seconds. A host that goes down cannot report that itself, so "host unreachable" still shows only in nerdfleet.
+Resident agents enabled before 0.2.6 get the hook's service when you run `enable` again or press `u`.
+
 ## How it reaches hosts
 
 - **Your own SSH setup.** nerdfleet runs the system `ssh` with the host's alias, so the address, user, key, jump hosts
