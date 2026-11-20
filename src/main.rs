@@ -21,6 +21,9 @@ USAGE
                               stop and remove it (--purge: its saved history
                               and alerts too)
   nerdfleet resident status NAME
+  nerdfleet resident test-alert NAME
+                              send a test alert through NAME's alert hook,
+                              ~/.config/nerdfleet/on-alert there
 
 OPTIONS
   -h, --help                  this text
@@ -39,10 +42,15 @@ fn main() {
         ["agent", "--stdio"] => agent::run_stdio(),
         // Started by systemd on hosts with a resident agent.
         ["agent", "--resident"] => agent::run_resident(),
+        // Started by systemd when the resident agent has alerts for the hook.
+        ["agent", "--notify"] => agent::run_notify(),
+        // Run over SSH by `nerdfleet resident test-alert`.
+        ["agent", "--test-alert"] => agent::test_alert(),
         ["resident", "enable", name] => with_host(name, resident_ctl::enable),
         ["resident", "disable", name] => with_host(name, |h, dir| resident_ctl::disable(h, dir, false)),
         ["resident", "disable", name, "--purge"] => with_host(name, |h, dir| resident_ctl::disable(h, dir, true)),
         ["resident", "status", name] => with_host(name, resident_ctl::status),
+        ["resident", "test-alert", name] => with_host(name, resident_ctl::test_alert),
         ["add", ref aliases @ ..] => {
             add::run(aliases, &paths::config_path(), &paths::ssh_config_path(), &paths::home())
         }

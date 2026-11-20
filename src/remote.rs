@@ -390,6 +390,8 @@ mod tests {
             crate::resident_ctl::ENABLE,
             crate::resident_ctl::DISABLE,
             crate::resident_ctl::STATUS,
+            crate::resident_ctl::WRITE_UNIT,
+            crate::resident_ctl::TEST_ALERT,
         ] {
             assert!(!s.contains('\'') && !s.contains('!') && !s.contains('\\') && !s.contains('\n'));
         }

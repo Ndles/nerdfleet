@@ -3,12 +3,15 @@
 //! In watch mode (`agent --stdio`) it writes measurements to stdout until
 //! stdin closes, or, when a resident agent runs on the host, connects the
 //! viewer to that one instead. In resident mode (`agent --resident`) it
-//! keeps sampling as a user service; see `resident`.
+//! keeps sampling as a user service; see `resident`. With an alert hook on
+//! the host, `agent --notify` passes the resident agent's alerts to it; see
+//! `notify`.
 //!
 //! It only reads: `/proc`, `/sys`, the GPU libraries, and the run cards in
 //! `~/.local/state/runcards` with the metrics files they name, when those are
 //! regular files of the agent's own user (docs/runcards.md). It never listens
-//! on a network socket and never reads another process's environment.
+//! on a network socket and never reads another process's environment. What
+//! it writes is its own: saved state, and alerts waiting for the hook.
 
 #[cfg(target_os = "linux")]
 mod alerts;
@@ -18,6 +21,8 @@ mod core;
 mod gpu;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod notify;
 #[cfg(target_os = "linux")]
 mod procs;
 #[cfg(target_os = "linux")]
@@ -91,6 +96,32 @@ pub fn run_resident() -> anyhow::Result<()> {
 #[cfg(target_os = "linux")]
 pub fn run_resident() -> anyhow::Result<()> {
     resident::run()
+}
+
+/// The variable the hook's unit names the host by, as the config does.
+pub const NOTIFY_NAME_VAR: &str = "NERDFLEET_NAME";
+
+/// `agent --notify`: passes the resident agent's new alerts to the user's
+/// hook; see `notify`.
+#[cfg(target_os = "linux")]
+pub fn run_notify() -> anyhow::Result<()> {
+    notify::run()
+}
+
+/// `agent --test-alert`: a test alert for the hook, through the outbox.
+#[cfg(target_os = "linux")]
+pub fn test_alert() -> anyhow::Result<()> {
+    notify::test()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn run_notify() -> anyhow::Result<()> {
+    anyhow::bail!("alert hooks do not support {} yet", std::env::consts::OS)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn test_alert() -> anyhow::Result<()> {
+    anyhow::bail!("alert hooks do not support {} yet", std::env::consts::OS)
 }
 
 #[cfg(target_os = "linux")]
